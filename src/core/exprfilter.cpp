@@ -40,7 +40,7 @@ Container& split(
     split1::empties_t empties = split1::empties_ok)
 {
     result.clear();
-    size_t current;   
+    size_t current;
     size_t next = -1;
     do {
         if (empties == split1::no_empties) {
@@ -73,6 +73,8 @@ typedef union {
 struct ExprOp {
     ExprUnion e;
     uint32_t op;
+    ExprOp() {
+    }
     ExprOp(SOperation op, float val) : op(op) {
         e.fval = val;
     }
@@ -88,6 +90,9 @@ enum PlaneOp {
 typedef struct {
     VSNodeRef *node[3];
     VSVideoInfo vi;
+#if VS_FEATURE_CUDA
+    ExprOp *gpu_ops[3];
+#endif
     std::vector<ExprOp> ops[3];
     int plane[3];
 #ifdef VS_TARGET_CPU_X86
@@ -98,6 +103,13 @@ typedef struct {
 } JitExprData;
 
 extern "C" void vs_evaluate_expr_sse2(const void *exprs, const uint8_t **rwptrs, const intptr_t *ptroffsets, int numiterations, void *stack);
+
+#if VS_FEATURE_CUDA
+extern void VS_CC exprProcessCUDA(const VSFrameRef **src, VSFrameRef *dst, const JitExprData *d,
+                                       VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi);
+extern ExprOp * VS_CC copyExprOps(const ExprOp *vops, int numOps);
+extern void VS_CC freeExprOps(ExprOp *gpu_ops);
+#endif
 
 static void VS_CC exprInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
     JitExprData *d = (JitExprData *) * instanceData;
@@ -124,203 +136,214 @@ static const VSFrameRef *VS_CC exprGetFrame(int n, int activationReason, void **
         int width = vsapi->getFrameWidth(src[0], 0);
         int planes[3] = { 0, 1, 2 };
         const VSFrameRef *srcf[3] = { d->plane[0] != poCopy ? NULL : src[0], d->plane[1] != poCopy ? NULL : src[0], d->plane[2] != poCopy ? NULL : src[0] };
-        VSFrameRef *dst = vsapi->newVideoFrame2(fi, width, height, srcf, planes, src[0], core);
+        FrameLocation fLocation = vsapi->getFrameLocation(src[0]);
+        VSFrameRef *dst;
 
-        const uint8_t *srcp[3];
-        int src_stride[3];
+        if (fLocation == flGPU) {
+#if VS_FEATURE_CUDA
+            dst = vsapi->newVideoFrameAtLocation2(fi, width, height, srcf, planes, src[0], core, flGPU);
+            exprProcessCUDA(src, dst, d, frameCtx, core, vsapi);
+#endif
+        } else {
+            dst = vsapi->newVideoFrame2(fi, width, height, srcf, planes, src[0], core);
+
+            const uint8_t *srcp[3];
+            int src_stride[3];
 
 #ifdef VS_TARGET_CPU_X86
 
-        intptr_t ptroffsets[4] = { d->vi.format->bytesPerSample * 8, 0, 0, 0 };
+            intptr_t ptroffsets[4] = { d->vi.format->bytesPerSample * 8, 0, 0, 0 };
 
-        for (int plane = 0; plane < d->vi.format->numPlanes; plane++) {
-            if (d->plane[plane] == poProcess) {
-                for (int i = 0; i < 3; i++) {
-                    if (d->node[i]) {
-                        srcp[i] = vsapi->getReadPtr(src[i], plane);
-                        src_stride[i] = vsapi->getStride(src[i], plane);
-                        ptroffsets[i + 1] = vsapi->getFrameFormat(src[i])->bytesPerSample * 8;
-                    } else {
-                        srcp[i] = NULL;
-                        src_stride[i] = 0;
-                        ptroffsets[i + 1] = 0;
+            for (int plane = 0; plane < d->vi.format->numPlanes; plane++) {
+                if (d->plane[plane] == poProcess) {
+                    for (int i = 0; i < 3; i++) {
+                        if (d->node[i]) {
+                            srcp[i] = vsapi->getReadPtr(src[i], plane);
+                            src_stride[i] = vsapi->getStride(src[i], plane);
+                            ptroffsets[i + 1] = vsapi->getFrameFormat(src[i])->bytesPerSample * 8;
+                        } else {
+                            srcp[i] = NULL;
+                            src_stride[i] = 0;
+                            ptroffsets[i + 1] = 0;
+                        }
+                    }
+
+                    uint8_t *dstp = vsapi->getWritePtr(dst, plane);
+                    int dst_stride = vsapi->getStride(dst, plane);
+                    int h = vsapi->getFrameHeight(dst, plane);
+                    int w = vsapi->getFrameWidth(dst, plane);
+
+                    int niterations = (w + 7)/8;
+                    const ExprOp *ops = &d->ops[plane][0];
+                    void *stack = d->stack;
+                    for (int y = 0; y < h; y++) {
+                        const uint8_t *rwptrs[4] = { dstp + dst_stride * y, srcp[0] + src_stride[0] * y, srcp[1] + src_stride[1] * y, srcp[2] + src_stride[2] * y };
+                        vs_evaluate_expr_sse2(ops, rwptrs, ptroffsets, niterations, stack);
                     }
                 }
-
-                uint8_t *dstp = vsapi->getWritePtr(dst, plane);
-                int dst_stride = vsapi->getStride(dst, plane);
-                int h = vsapi->getFrameHeight(dst, plane);
-                int w = vsapi->getFrameWidth(dst, plane);
-
-                int niterations = (w + 7)/8;
-                const ExprOp *ops = &d->ops[plane][0];
-                void *stack = d->stack;
-                for (int y = 0; y < h; y++) {
-                    const uint8_t *rwptrs[4] = { dstp + dst_stride * y, srcp[0] + src_stride[0] * y, srcp[1] + src_stride[1] * y, srcp[2] + src_stride[2] * y };
-                    vs_evaluate_expr_sse2(ops, rwptrs, ptroffsets, niterations, stack);
-                }
             }
-        }
-        
+
 #else
 
-        for (int plane = 0; plane < d->vi.format->numPlanes; plane++) {
-            if (d->plane[plane] == poProcess) {
-                for (int i = 0; i < 3; i++) {
-                    if (d->node[i]) {
-                        srcp[i] = vsapi->getReadPtr(src[i], plane);
-                        src_stride[i] = vsapi->getStride(src[i], plane);
-                    } else {
-                        srcp[i] = NULL;
-                        src_stride[i] = 0;
-                    }
-                }
-
-                uint8_t *dstp = vsapi->getWritePtr(dst, plane);
-                int dst_stride = vsapi->getStride(dst, plane);
-                int h = vsapi->getFrameHeight(src[0], plane);
-                int w = vsapi->getFrameWidth(src[0], plane);
-                const ExprOp *vops = &d->ops[plane][0]; 
-                float *stack = &d->stack[0];
-                float stacktop = 0;
-                float tmp;
-
-                for (int y = 0; y < h; y++) {
-                    for (int x = 0; x < w; x++) {
-                        int si = 0;
-                        int i = -1;
-                        while (true) {
-                            i++;
-                            switch (vops[i].op) {
-                            case opLoadSrc8:
-                                stack[si] = stacktop;
-                                stacktop = srcp[vops[i].e.ival][x];
-                                ++si;
-                                break;
-                            case opLoadSrc16:
-                                stack[si] = stacktop;
-                                stacktop = ((const uint16_t *)srcp[vops[i].e.ival])[x];
-                                ++si;
-                                break;
-                            case opLoadSrcF:
-                                stack[si] = stacktop;
-                                stacktop = ((const float *)srcp[vops[i].e.ival])[x];
-                                ++si;
-                                break;
-                            case opLoadConst: 
-                                stack[si] = stacktop;
-                                stacktop = vops[i].e.fval;
-                                ++si;
-                                break;
-                            case opDup:
-                                stack[si] = stacktop;
-                                ++si;
-                                break;
-                            case opSwap:
-                                tmp = stacktop;
-                                stacktop = stack[si];
-                                stack[si] = tmp;
-                                break;
-                            case opAdd:
-                                --si;
-                                stacktop += stack[si];
-                                break;
-                            case opSub:
-                                --si;
-                                stacktop = stack[si] - stacktop;
-                                break;
-                            case opMul:
-                                --si;
-                                stacktop *= stack[si];
-                                break;
-                            case opDiv:
-                                --si;
-                                stacktop = stack[si] / stacktop;
-                                break;
-                            case opMax:
-                                --si;
-                                stacktop = std::max(stacktop, stack[si]);
-                                break;
-                            case opMin:
-                                --si;
-                                stacktop = std::min(stacktop, stack[si]);
-                                break;
-                            case opExp:
-                                stacktop = exp(stacktop);
-                                break;
-                            case opLog:
-                                stacktop = log(stacktop);
-                                break;
-                            case opPow:
-                                --si;
-                                stacktop = pow(stack[si], stacktop);
-                                break;
-                            case opSqrt:
-                                stacktop = sqrt(stacktop);
-                                break;
-                            case opAbs:
-                                stacktop = abs(stacktop);
-                                break;
-                            case opGt:
-                                --si;
-                                stacktop = (stack[si] > stacktop) ? 1.0f : 0.0f;
-                                break;
-                            case opLt:
-                                --si;
-                                stacktop = (stack[si] < stacktop) ? 1.0f : 0.0f;
-                                break;
-                            case opEq:
-                                --si;
-                                stacktop = (stack[si] == stacktop) ? 1.0f : 0.0f;
-                                break;
-                            case opLE:
-                                --si;
-                                stacktop = (stack[si] <= stacktop) ? 1.0f : 0.0f;
-                                break;
-                            case opGE:
-                                --si;
-                                stacktop = (stack[si] >= stacktop) ? 1.0f : 0.0f;
-                                break;
-                            case opTernary:
-                                si -= 2;
-                                stacktop = (stack[si] > 0) ? stack[si + 1] : stacktop;
-                                break;
-                            case opAnd:
-                                --si;
-                                stacktop = (stacktop > 0 && stack[si] > 0) ? 1.0f : 0.0f;
-                                break;
-                            case opOr:
-                                --si;
-                                stacktop = (stacktop > 0 || stack[si] > 0) ? 1.0f : 0.0f;
-                                break;
-                            case opXor:
-                                --si;
-                                stacktop = ((stacktop > 0) != (stack[si] > 0)) ? 1.0f : 0.0f;
-                                break;
-                            case opNeg:
-                                stacktop = (stacktop > 0) ? 0.0f : 1.0f;
-                                break;
-                            case opStore8:
-                                dstp[x] = std::max(0.0f, std::min(stacktop, 255.0f)) + 0.5f;
-                                goto loopend;
-                            case opStore16:
-                                ((uint16_t *)dstp)[x] = std::max(0.0f, std::min(stacktop, 256*255.0f)) + 0.5f;
-                                goto loopend;
-                            case opStoreF:
-                                ((float *)dstp)[x] = stacktop;
-                                goto loopend;
-                            }
+            for (int plane = 0; plane < d->vi.format->numPlanes; plane++) {
+                if (d->plane[plane] == poProcess) {
+                    for (int i = 0; i < 3; i++) {
+                        if (d->node[i]) {
+                            srcp[i] = vsapi->getReadPtr(src[i], plane);
+                            src_stride[i] = vsapi->getStride(src[i], plane);
+                        } else {
+                            srcp[i] = NULL;
+                            src_stride[i] = 0;
                         }
-                        loopend:;
                     }
-                    dstp += dst_stride;
-                    srcp[0] += src_stride[0];
-                    srcp[1] += src_stride[1];
-                    srcp[2] += src_stride[2];
+
+                    uint8_t *dstp = vsapi->getWritePtr(dst, plane);
+                    int dst_stride = vsapi->getStride(dst, plane);
+                    int h = vsapi->getFrameHeight(src[0], plane);
+                    int w = vsapi->getFrameWidth(src[0], plane);
+                    const ExprOp *vops = &d->ops[plane][0];
+                    float *stack = &d->stack[0];
+                    float stacktop = 0;
+                    float tmp;
+
+                    for (int y = 0; y < h; y++) {
+                        for (int x = 0; x < w; x++) {
+                            int si = 0;
+                            int i = -1;
+                            while (true) {
+                                i++;
+                                switch (vops[i].op) {
+                                case opLoadSrc8:
+                                    stack[si] = stacktop;
+                                    stacktop = srcp[vops[i].e.ival][x];
+                                    ++si;
+                                    break;
+                                case opLoadSrc16:
+                                    stack[si] = stacktop;
+                                    stacktop = ((const uint16_t *)srcp[vops[i].e.ival])[x];
+                                    ++si;
+                                    break;
+                                case opLoadSrcF:
+                                    stack[si] = stacktop;
+                                    stacktop = ((const float *)srcp[vops[i].e.ival])[x];
+                                    ++si;
+                                    break;
+                                case opLoadConst:
+                                    stack[si] = stacktop;
+                                    stacktop = vops[i].e.fval;
+                                    ++si;
+                                    break;
+                                case opDup:
+                                    stack[si] = stacktop;
+                                    ++si;
+                                    break;
+                                case opSwap:
+                                    tmp = stacktop;
+                                    stacktop = stack[si];
+                                    stack[si] = tmp;
+                                    break;
+                                case opAdd:
+                                    --si;
+                                    stacktop += stack[si];
+                                    break;
+                                case opSub:
+                                    --si;
+                                    stacktop = stack[si] - stacktop;
+                                    break;
+                                case opMul:
+                                    --si;
+                                    stacktop *= stack[si];
+                                    break;
+                                case opDiv:
+                                    --si;
+                                    stacktop = stack[si] / stacktop;
+                                    break;
+                                case opMax:
+                                    --si;
+                                    stacktop = std::max(stacktop, stack[si]);
+                                    break;
+                                case opMin:
+                                    --si;
+                                    stacktop = std::min(stacktop, stack[si]);
+                                    break;
+                                case opExp:
+                                    stacktop = exp(stacktop);
+                                    break;
+                                case opLog:
+                                    stacktop = log(stacktop);
+                                    break;
+                                case opPow:
+                                    --si;
+                                    stacktop = pow(stack[si], stacktop);
+                                    break;
+                                case opSqrt:
+                                    stacktop = sqrt(stacktop);
+                                    break;
+                                case opAbs:
+                                    stacktop = abs(stacktop);
+                                    break;
+                                case opGt:
+                                    --si;
+                                    stacktop = (stack[si] > stacktop) ? 1.0f : 0.0f;
+                                    break;
+                                case opLt:
+                                    --si;
+                                    stacktop = (stack[si] < stacktop) ? 1.0f : 0.0f;
+                                    break;
+                                case opEq:
+                                    --si;
+                                    stacktop = (stack[si] == stacktop) ? 1.0f : 0.0f;
+                                    break;
+                                case opLE:
+                                    --si;
+                                    stacktop = (stack[si] <= stacktop) ? 1.0f : 0.0f;
+                                    break;
+                                case opGE:
+                                    --si;
+                                    stacktop = (stack[si] >= stacktop) ? 1.0f : 0.0f;
+                                    break;
+                                case opTernary:
+                                    si -= 2;
+                                    stacktop = (stack[si] > 0) ? stack[si + 1] : stacktop;
+                                    break;
+                                case opAnd:
+                                    --si;
+                                    stacktop = (stacktop > 0 && stack[si] > 0) ? 1.0f : 0.0f;
+                                    break;
+                                case opOr:
+                                    --si;
+                                    stacktop = (stacktop > 0 || stack[si] > 0) ? 1.0f : 0.0f;
+                                    break;
+                                case opXor:
+                                    --si;
+                                    stacktop = ((stacktop > 0) != (stack[si] > 0)) ? 1.0f : 0.0f;
+                                    break;
+                                case opNeg:
+                                    stacktop = (stacktop > 0) ? 0.0f : 1.0f;
+                                    break;
+                                case opStore8:
+                                    dstp[x] = std::max(0.0f, std::min(stacktop, 255.0f)) + 0.5f;
+                                    goto loopend;
+                                case opStore16:
+                                    ((uint16_t *)dstp)[x] = std::max(0.0f, std::min(stacktop, 256*255.0f)) + 0.5f;
+                                    goto loopend;
+                                case opStoreF:
+                                    ((float *)dstp)[x] = stacktop;
+                                    goto loopend;
+                                }
+                            }
+                            loopend:;
+                        }
+                        dstp += dst_stride;
+                        srcp[0] += src_stride[0];
+                        srcp[1] += src_stride[1];
+                        srcp[2] += src_stride[2];
+                    }
                 }
             }
-        }
 #endif
+        }
+
         for (int i = 0; i < 3; i++)
             vsapi->freeFrame(src[i]);
         return dst;
@@ -331,6 +354,11 @@ static const VSFrameRef *VS_CC exprGetFrame(int n, int activationReason, void **
 
 static void VS_CC exprFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
     JitExprData *d = (JitExprData *)instanceData;
+#if VS_FEATURE_CUDA
+    for (int i = 0; i < d->vi.format->numPlanes; i++) {
+        freeExprOps(&d->gpu_ops[i][0]);
+    }
+#endif
     for (int i = 0; i < 3; i++)
         vsapi->freeNode(d->node[i]);
     delete d;
@@ -518,8 +546,12 @@ static void VS_CC exprCreate(const VSMap *in, VSMap *out, void *userData, VSCore
 
         const SOperation sop[3] = { getLoadOp(vi[0]), getLoadOp(vi[1]), getLoadOp(vi[2]) };
         int maxStackSize = 0;
-        for (int i = 0; i < d.vi.format->numPlanes; i++)
+        for (int i = 0; i < d.vi.format->numPlanes; i++) {
             maxStackSize = std::max(parseExpression(expr[i], d.ops[i], sop, getStoreOp(&d.vi)), maxStackSize);
+#if VS_FEATURE_CUDA
+            d.gpu_ops[i] = copyExprOps(&d.ops[i][0], d.ops[i].size());
+#endif
+        }
 
 #ifdef VS_TARGET_CPU_X86
         d.stack = vs_aligned_malloc<void>(maxStackSize * 32, 32);

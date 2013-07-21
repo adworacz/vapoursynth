@@ -58,15 +58,17 @@ void FrameContext::setError(const QByteArray &errorMsg) {
 
 ///////////////
 
-VSFrameData::VSFrameData(quint32 size, MemoryUse *mem) : QSharedData(), mem(mem), size(size) {
+VSFrameData::VSFrameData(quint32 size, MemoryUse *mem) : QSharedData(), mem(mem), size(size), frameLocation(flLocal) {
     data = vs_aligned_malloc<uint8_t>(size, VSFrame::alignment);
     Q_CHECK_PTR(data);
     mem->add(size);
 }
 
+#if !VS_FEATURE_CUDA
 VSFrameData::VSFrameData(const VSFrameData &d) : QSharedData(d) {
     size = d.size;
     mem = d.mem;
+    frameLocation = d.frameLocation;
     data = vs_aligned_malloc<uint8_t>(size, VSFrame::alignment);
     Q_CHECK_PTR(data);
     mem->add(size);
@@ -74,9 +76,10 @@ VSFrameData::VSFrameData(const VSFrameData &d) : QSharedData(d) {
 }
 
 VSFrameData::~VSFrameData() {
-	vs_aligned_free(data);
+    vs_aligned_free(data);
     mem->subtract(size);
 }
+#endif
 
 ///////////////
 
@@ -318,7 +321,7 @@ PVideoFrame VSNode::getFrameInternal(int n, int activationReason, const PFrameCo
     return p;
 }
 
-void VSNode::reserveThread() { 
+void VSNode::reserveThread() {
 	core->threadPool->reserveThread();
 }
 
@@ -447,7 +450,7 @@ void VS_CC loadPluginInitialize(VSConfigPlugin configFunc, VSRegisterFunction re
 extern "C" void VS_CC avsWrapperInitialize(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin);
 #endif
 
-VSCore::VSCore(int threads) : memory(new MemoryUse()), formatIdOffset(1000) {
+VSCore::VSCore(int threads) : memory(new MemoryUse()), gpuMemory(new MemoryUse()), formatIdOffset(1000) {
     threadPool = new VSThreadPool(this, threads);
 
     // Register known formats with informational names
@@ -514,15 +517,24 @@ VSCore::VSCore(int threads) : memory(new MemoryUse()), formatIdOffset(1000) {
     resizeInitialize(::configPlugin, ::registerFunction, p);
     plugins.insert(p->identifier, p);
     p->enableCompat();
+
+#if VS_FEATURE_CUDA
+    gpuManager = new VSGPUManager();
+#endif
 }
 
 VSCore::~VSCore() {
     memory->signalFree();
+    gpuMemory->signalFree();
     //delete threadPool;
     foreach(VSPlugin * p, plugins)
         delete p;
     foreach(VSFormat * f, formats)
         delete f;
+
+#if VS_FEATURE_CUDA
+    delete gpuManager;
+#endif
 }
 
 QMutex VSCore::filterLock(QMutex::Recursive);
@@ -582,6 +594,9 @@ void VSCore::createFilter(const VSMap *in, VSMap *out, const QByteArray &name, V
 }
 
 int64_t VSCore::setMaxCacheSize(int64_t bytes) {
+#if VS_FEATURE_CUDA
+    gpuMemory->setMaxMemoryUse(bytes);
+#endif
     return memory->setMaxMemoryUse(bytes);
 }
 

@@ -91,6 +91,7 @@ def options(opt):
 
     opt.add_option('--filters', action = 'store', default = 'true', help = 'build included filters (true/false)')
     opt.add_option('--examples', action = 'store', default = 'false', help = 'install SDK examples (true/false)')
+    opt.add_option('--cuda', action = 'store', default = 'true', help = 'build with CUDA enhancements (true/false)')
 
     opt.add_option('--docs', action = 'store', default = 'false', help = 'build the documentation (true/false)')
 
@@ -135,7 +136,8 @@ def configure(conf):
               'pipe',
               'filters',
               'examples',
-              'docs']:
+              'docs',
+              'cuda']:
         val = conf.options.__dict__[x]
 
         if not val in ['true', 'false']:
@@ -171,7 +173,8 @@ def configure(conf):
                    ('PIPE', 'vspipe'),
                    ('FILTERS', 'included filters'),
                    ('EXAMPLES', 'plugin examples'),
-                   ('DOCS', 'documentation')]:
+                   ('DOCS', 'documentation'),
+                   ('CUDA', 'CUDA support')]:
         conf.msg('Enabling {0}?'.format(y), 'yes' if conf.env[x] == 'true' else 'no')
 
     conf.define('VS_PATH_PREFIX', conf.env.PREFIX)
@@ -184,11 +187,21 @@ def configure(conf):
         conf.define('VS_PATH_' + u, conf.env[u])
         conf.msg('Setting {0} to'.format(u), conf.env[u])
 
+    if conf.options.cuda == 'true':
+        conf.load('cuda')
+        gpu_archs = ['-gencode', 'arch=compute_20,code=sm_20',
+                    '-gencode', 'arch=compute_20,code=sm_21',
+                    '-gencode', 'arch=compute_30,code=sm_30',
+                    '-gencode', 'arch=compute_35,code=sm_35']
+        for arch in gpu_archs:
+            conf.env.append_value('CUDAFLAGS', arch)
+
     if conf.env.DEST_CPU in ['x86', 'x86_64', 'x64', 'amd64', 'x86_amd64']:
         # Load Yasm explicitly, then the Nasm module which
         # supports both Nasm and Yasm.
         conf.find_program('yasm', var = 'AS', mandatory = True)
         conf.load('nasm')
+
 
         add_options(['ASFLAGS'],
                     ['-w',
@@ -220,6 +233,9 @@ def configure(conf):
                     ['-DARCH_X86_64=1',
                      '-DPIC=1'])
 
+        if conf.options.cuda == 'true':
+            add_options(['CUDAFLAGS'], ['-m64'])
+
         if conf.env.DEST_OS == 'darwin':
             fmt = 'macho64'
         elif conf.env.DEST_OS in ['win32', 'cygwin', 'msys', 'uwin']:
@@ -229,6 +245,9 @@ def configure(conf):
     elif conf.env.DEST_CPU == 'x86':
         add_options(['ASFLAGS'],
                     ['-DARCH_X86_64=0'])
+
+        if conf.options.cuda == 'true':
+            add_options(['CUDAFLAGS'], ['-m32'])
 
         if conf.env.DEST_OS == 'darwin':
             fmt = 'macho32'
@@ -267,6 +286,10 @@ def configure(conf):
         else:
             add_options(['ASFLAGS'],
                         ['-Wa,-g'])
+
+        if conf.options.cuda == 'true':
+                    add_options(['NVCC_CXXFLAGS'], ['-g', '-G'])
+
     elif conf.options.mode == 'release':
         if conf.env.CXX_NAME == 'gcc':
             add_options(['CFLAGS', 'CXXFLAGS'],
@@ -325,6 +348,36 @@ def configure(conf):
         conf.check_cc(use = ['ASS'], header_name = 'ass/ass.h', mandatory = False)
         conf.check_cc(use = ['ASS'], header_name = 'ass/ass.h', function_name = 'ass_library_init', mandatory = False)
 
+    def convert_cuda_cxx_options():
+        """ This function is necessary because CUDA's nvcc compiler does not
+        understand certain options such as 'fPIC', and requires a special secondary flag,
+        '-Xcompiler', in order to successfully pass 'fPIC' to the C/C++ compiler.
+
+        We can't simply change the CXXFLAGS, as -Xcompiler is an invalid option for GCC,
+        so we simply copy over all options, modifying the 'fPIC' option as we go."""
+
+        unsafe_options = conf.env['CXXFLAGS']
+        safe_options = []
+        xcompiler_options = []
+
+        for option in unsafe_options:
+            if option in ['-fPIC', '-ggdb', '-ftrapv']:
+                xcompiler_options.append(option)
+            else:
+                safe_options.append(option)
+
+        if xcompiler_options:
+            safe_options.extend(['-Xcompiler', ','.join(xcompiler_options)])
+
+        add_options(['NVCC_CXXFLAGS'], safe_options)
+
+    convert_cuda_cxx_options()
+
+    # Handle CUDA compilation on GCC > 4.6
+    if conf.env.CC_VERSION >= ('4','7','0'):
+        print("Fixing CUDA compilation with GCC >= 4.7")
+        add_options(['NVCC_CXXFLAGS'],['-include','../include/fix_cuda_cxx.h'])
+
 def build(bld):
     def search_paths(paths):
         srcpaths = []
@@ -332,6 +385,9 @@ def build(bld):
         for path in paths:
             srcpaths += [os.path.join(path, '*.c'),
                          os.path.join(path, '*.cpp')]
+
+            if bld.env.CUDA == 'true':
+                srcpaths += [os.path.join(path, '*.cu')]
 
             if bld.env.DEST_CPU in ['x86', 'x86_64', 'x64', 'amd64', 'x86_amd64']:
                 srcpaths += [os.path.join(path, '*.asm')]
@@ -349,7 +405,7 @@ def build(bld):
 
         bld(features = 'c qxx asm',
             includes = 'include',
-            use = ['QTCORE', 'SWSCALE', 'AVUTIL', 'AVCODEC'],
+            use = ['QTCORE', 'SWSCALE', 'AVUTIL', 'AVCODEC', 'CUDA', 'CUDART'],
             source = bld.path.ant_glob(sources),
             target = 'objs')
 
@@ -420,6 +476,13 @@ def build(bld):
                 source = bld.path.ant_glob(search_paths([os.path.join('src', 'filters', 'assvapour')])),
                 target = 'assvapour',
                 install_path = '${PLUGINDIR}')
+
+        bld(features = 'cxx cxxshlib',
+            includes = 'include',
+            use = ['CUDA', 'CUDART'],
+            source = bld.path.ant_glob(search_paths([os.path.join('src', 'filters', 'cuinvert')])),
+            target = 'cuinvert',
+            install_path = '${PLUGINDIR}')
 
     if bld.env.DOCS == 'true':
         bld(features = 'docs',

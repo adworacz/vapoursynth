@@ -33,6 +33,10 @@
 #	include <dlfcn.h>
 #endif
 
+#if VS_FEATURE_CUDA
+    #include "vsgpumanager.h"
+#endif
+
 class VSFrame;
 struct VSCore;
 struct VSNode;
@@ -216,16 +220,23 @@ class VSFrameData : public QSharedData {
 private:
     MemoryUse *mem;
     quint32 size;
+    FrameLocation frameLocation;
 public:
     uint8_t *data;
     VSFrameData(quint32 size, MemoryUse *mem);
     VSFrameData(const VSFrameData &d);
     ~VSFrameData();
+
+#if VS_FEATURE_CUDA
+    VSFrameData(int width, int height, int *stride, int bytesPerSample, MemoryUse *mem, FrameLocation fLocation, const VSCUDAStream *stream);
+    void transferData(VSFrameData *dst, int dstStride, int srcStride, int width, int height, int bytesPerSample, FrameTransferDirection direction) const;
+    const VSCUDAStream *stream;
+#endif
+
 };
 
 class VSFrame {
 private:
-    enum FrameLocation { flLocal = 0, flGPU = 1 };
     const VSFormat *format;
     QSharedDataPointer<VSFrameData> data[3];
     int width;
@@ -239,6 +250,13 @@ public:
     VSFrame(const VSFormat *f, int width, int height, const VSFrame *propSrc, VSCore *core);
     VSFrame(const VSFormat *f, int width, int height, const VSFrame * const *planeSrc, const int *plane, const VSFrame *propSrc, VSCore *core);
     VSFrame(const VSFrame &f);
+
+#ifdef VS_FEATURE_CUDA
+    VSFrame(const VSFormat *f, int width, int height, const VSFrame *propSrc, VSCore *core, FrameLocation fLocation, const VSCUDAStream **streams);
+    VSFrame(const VSFormat *f, int width, int height, const VSFrame * const *planeSrc, const int *plane, const VSFrame *propSrc, VSCore *core, FrameLocation fLocation, const VSCUDAStream **streams);
+    void transferFrame(VSFrame &dstFrame, FrameTransferDirection direction) const;
+    const VSCUDAStream *getStream(int plane) const;
+#endif
 
     VSMap &getProperties() {
         return properties;
@@ -261,6 +279,9 @@ public:
     int getStride(int plane) const;
     const uint8_t *getReadPtr(int plane) const;
     uint8_t *getWritePtr(int plane);
+    FrameLocation getFrameLocation() const {
+        return frameLocation;
+    }
 };
 
 class FrameContext {
@@ -465,11 +486,20 @@ public:
     QList<VSNode *> caches;
     VSThreadPool *threadPool;
     MemoryUse *memory;
+    MemoryUse *gpuMemory;
 
     PVideoFrame newVideoFrame(const VSFormat *f, int width, int height, const VSFrame *propSrc);
     PVideoFrame newVideoFrame(const VSFormat *f, int width, int height, const VSFrame * const *planeSrc, const int *planes, const VSFrame *propSrc);
     PVideoFrame copyFrame(const PVideoFrame &srcf);
     void copyFrameProps(const PVideoFrame &src, PVideoFrame &dst);
+
+#if VS_FEATURE_CUDA
+    VSGPUManager *gpuManager;
+    PVideoFrame newVideoFrame(const VSFormat *f, int width, int height, const VSFrame *propSrc, FrameLocation fLocation);
+    PVideoFrame newVideoFrame(const VSFormat *f, int width, int height, const VSFrame * const *planeSrc, const int *planes, const VSFrame *propSrc, FrameLocation fLocation);
+    void transferVideoFrame(const PVideoFrame &srcf, PVideoFrame &dstf, FrameTransferDirection direction);
+    VSGPUManager* getGPUManager() const;
+#endif
 
     const VSFormat *getFormatPreset(int id);
     const VSFormat *registerFormat(VSColorFamily colorFamily, VSSampleType sampleType, int bitsPerSample, int subSamplingW, int subSamplingH, const char *name = NULL, int id = pfNone);

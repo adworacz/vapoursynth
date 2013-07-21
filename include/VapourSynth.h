@@ -63,6 +63,10 @@ typedef struct VSMap VSMap;
 typedef struct VSAPI VSAPI;
 typedef struct VSFrameContext VSFrameContext;
 
+#if VS_FEATURE_CUDA
+    typedef struct VSCUDAStream VSCUDAStream;
+#endif
+
 typedef enum VSColorFamily {
     // all planar formats
     cmGray   = 1000000,
@@ -194,6 +198,13 @@ typedef enum VSMessageType {
     mtFatal
 } VSMessageType;
 
+typedef enum FrameLocation { flLocal = 0, flGPU = 1 } FrameLocation;
+
+typedef enum FrameTransferDirection {
+    ftdCPUtoGPU = 0, //Might change to HOST_DEVICE, DEVICE_HOST similar to CUDA API.
+    ftdGPUtoCPU = 1
+} FrameTransferDirection;
+
 // core function typedefs
 typedef	VSCore *(VS_CC *VSCreateCore)(int threads);
 typedef	void (VS_CC *VSFreeCore)(VSCore *core);
@@ -235,6 +246,15 @@ typedef void (VS_CC *VSCopyFrameProps)(const VSFrameRef *src, VSFrameRef *dst, V
 typedef int (VS_CC *VSGetStride)(const VSFrameRef *f, int plane);
 typedef const uint8_t *(VS_CC *VSGetReadPtr)(const VSFrameRef *f, int plane);
 typedef uint8_t *(VS_CC *VSGetWritePtr)(VSFrameRef *f, int plane);
+
+typedef FrameLocation (VS_CC *VSGetFrameLocation)(const VSFrameRef *f);
+
+#if VS_FEATURE_CUDA
+typedef VSFrameRef *(VS_CC *VSNewVideoFrameAtLocation)(const VSFormat *format, int width, int height, const VSFrameRef *propSrc, VSCore *core, FrameLocation fLocation);
+typedef VSFrameRef *(VS_CC *VSNewVideoFrameAtLocation2)(const VSFormat *format, int width, int height, const VSFrameRef **planeSrc, const int *planes, const VSFrameRef *propSrc, VSCore *core, FrameLocation fLocation);
+typedef void (VS_CC *VSTransferVideoFrame)(const VSFrameRef *srcFrame, VSFrameRef *dstFrame, FrameTransferDirection direction, VSCore *core);
+typedef const VSCUDAStream *(VS_CC *VSGetStream)(const VSFrameRef *frame, int plane);
+#endif
 
 // property access
 typedef const VSVideoInfo *(VS_CC *VSGetVideoInfo)(VSNodeRef *node);
@@ -372,6 +392,15 @@ struct VSAPI {
     VSSetMaxCacheSize setMaxCacheSize;
     VSGetOutputIndex getOutputIndex;
     VSNewVideoFrame2 newVideoFrame2;
+
+    VSGetFrameLocation getFrameLocation;
+
+#if VS_FEATURE_CUDA
+    VSNewVideoFrameAtLocation newVideoFrameAtLocation;
+    VSNewVideoFrameAtLocation2 newVideoFrameAtLocation2;
+    VSTransferVideoFrame transferVideoFrame;
+    VSGetStream getStream;
+#endif
 
     VSSetMessageHandler setMessageHandler;
 };

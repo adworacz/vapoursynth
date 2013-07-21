@@ -1,7 +1,14 @@
-build/*
-doc/_build/*
-
+#Ignore Waf build stuff
+/build
+/doc/_build
 .lock-*
 .waf*
-
 waf
+
+
+#Ignore python compile files
+*.pyc
+
+#Mac OS X
+.DS_Store
+

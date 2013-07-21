@@ -312,6 +312,11 @@ static int addBordersVerify(int left, int right, int top, int bottom, const VSFo
         return 0;
 }
 
+#if VS_FEATURE_CUDA
+extern void VS_CC addBordersProcessCUDA(const VSFrameRef *src, VSFrameRef *dst, const AddBordersData *d,
+                                    VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi);
+#endif
+
 static const VSFrameRef *VS_CC addBordersGetframe(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     AddBordersData *d = (AddBordersData *) * instanceData;
     char msg[150];
@@ -324,75 +329,85 @@ static const VSFrameRef *VS_CC addBordersGetframe(int n, int activationReason, v
         const VSFrameRef *src = vsapi->getFrameFilter(n, d->node, frameCtx);
         const VSFormat *fi = vsapi->getFrameFormat(src);
         VSFrameRef *dst;
+        const FrameLocation fLocation = vsapi->getFrameLocation(src);
 
         if (addBordersVerify(d->left, d->right, d->top, d->bottom, fi, msg)) {
             vsapi->setFilterError(msg, frameCtx);
             return 0;
         }
 
-        dst = vsapi->newVideoFrame(fi, vsapi->getFrameWidth(src, 0) + d->left + d->right, vsapi->getFrameHeight(src, 0) + d->top + d->bottom, src, core);
+        if (fLocation == flGPU) {
+#if VS_FEATURE_CUDA
+            dst = vsapi->newVideoFrameAtLocation(fi, vsapi->getFrameWidth(src, 0) + d->left + d->right, vsapi->getFrameHeight(src, 0) + d->top + d->bottom, src, core, flGPU);
+            addBordersProcessCUDA(src, dst, d, frameCtx, core, vsapi);
+#endif
+        } else {
+            int plane;
+            int hloop;
+            dst = vsapi->newVideoFrame(fi, vsapi->getFrameWidth(src, 0) + d->left + d->right, vsapi->getFrameHeight(src, 0) + d->top + d->bottom, src, core);
 
-        // now that argument validation is over we can spend the next few lines actually adding borders
-        for (plane = 0; plane < fi->numPlanes; plane++) {
-            int rowsize = vsapi->getFrameWidth(src, plane) * fi->bytesPerSample;
-            int srcstride = vsapi->getStride(src, plane);
-            int dststride = vsapi->getStride(dst, plane);
-            int srcheight = vsapi->getFrameHeight(src, plane);
-            const uint8_t *srcdata = vsapi->getReadPtr(src, plane);
-            uint8_t *dstdata = vsapi->getWritePtr(dst, plane);
-            int padt = d->top >> (plane ? fi->subSamplingH : 0);
-            int padb = d->bottom >> (plane ? fi->subSamplingH : 0);
-            int padl = (d->left >> (plane ? fi->subSamplingW : 0)) * fi->bytesPerSample;
-            int padr = (d->right >> (plane ? fi->subSamplingW : 0)) * fi->bytesPerSample;
-			int color = d->color.i[plane];
+            // now that argument validation is over we can spend the next few lines actually adding borders
+            for (plane = 0; plane < fi->numPlanes; plane++) {
+                int rowsize = vsapi->getFrameWidth(src, plane) * fi->bytesPerSample;
+                int srcstride = vsapi->getStride(src, plane);
+                int dststride = vsapi->getStride(dst, plane);
+                int srcheight = vsapi->getFrameHeight(src, plane);
+                const uint8_t *srcdata = vsapi->getReadPtr(src, plane);
+                uint8_t *dstdata = vsapi->getWritePtr(dst, plane);
+                int padt = d->top >> (plane ? fi->subSamplingH : 0);
+                int padb = d->bottom >> (plane ? fi->subSamplingH : 0);
+                int padl = (d->left >> (plane ? fi->subSamplingW : 0)) * fi->bytesPerSample;
+                int padr = (d->right >> (plane ? fi->subSamplingW : 0)) * fi->bytesPerSample;
+                int color = d->color.i[plane];
 
-			switch (d->vi->format->bytesPerSample) {
-			case 1:
-				vs_memset8(dstdata, color, padt * dststride);
-				break;
-			case 2:
-				vs_memset16(dstdata, color, padt * dststride / 2);
-				break;
-			case 4:
-				vs_memset32(dstdata, color, padt * dststride / 4);
-				break;
-			}
-            dstdata += padt * dststride; 
+                switch (d->vi->format->bytesPerSample) {
+                case 1:
+                    vs_memset8(dstdata, color, padt * dststride);
+                    break;
+                case 2:
+                    vs_memset16(dstdata, color, padt * dststride / 2);
+                    break;
+                case 4:
+                    vs_memset32(dstdata, color, padt * dststride / 4);
+                    break;
+                }
+                dstdata += padt * dststride;
 
-            for (hloop = 0; hloop < srcheight; hloop++) {
-				switch (d->vi->format->bytesPerSample) {
-				case 1:
-					vs_memset8(dstdata, color, padl);
-					memcpy(dstdata + padl, srcdata, rowsize);
-					vs_memset8(dstdata + padl + rowsize, color, padr);
-					break;
-				case 2:
-					vs_memset16(dstdata, color, padl / 2);
-					memcpy(dstdata + padl, srcdata, rowsize);
-					vs_memset16(dstdata + padl + rowsize, color, padr / 2);
-					break;
-				case 4:
-					vs_memset32(dstdata, color, padl / 4);
-					memcpy(dstdata + padl, srcdata, rowsize);
-					vs_memset32(dstdata + padl + rowsize, color, padr / 4);
-					break;
-				}
+                for (hloop = 0; hloop < srcheight; hloop++) {
+                    switch (d->vi->format->bytesPerSample) {
+                    case 1:
+                        vs_memset8(dstdata, color, padl);
+                        memcpy(dstdata + padl, srcdata, rowsize);
+                        vs_memset8(dstdata + padl + rowsize, color, padr);
+                        break;
+                    case 2:
+                        vs_memset16(dstdata, color, padl / 2);
+                        memcpy(dstdata + padl, srcdata, rowsize);
+                        vs_memset16(dstdata + padl + rowsize, color, padr / 2);
+                        break;
+                    case 4:
+                        vs_memset32(dstdata, color, padl / 4);
+                        memcpy(dstdata + padl, srcdata, rowsize);
+                        vs_memset32(dstdata + padl + rowsize, color, padr / 4);
+                        break;
+                    }
 
-                dstdata += dststride;
-                srcdata += srcstride;
+                    dstdata += dststride;
+                    srcdata += srcstride;
+                }
+
+                switch (d->vi->format->bytesPerSample) {
+                case 1:
+                    vs_memset8(dstdata, color, padb * dststride);
+                    break;
+                case 2:
+                    vs_memset16(dstdata, color, padb * dststride / 2);
+                    break;
+                case 4:
+                    vs_memset32(dstdata, color, padb * dststride / 4);
+                    break;
+                }
             }
-
-			switch (d->vi->format->bytesPerSample) {
-			case 1:
-				vs_memset8(dstdata, color, padb * dststride);
-				break;
-			case 2:
-				vs_memset16(dstdata, color, padb * dststride / 2);
-				break;
-			case 4:
-				vs_memset32(dstdata, color, padb * dststride / 4);
-				break;
-			}
         }
 
         vsapi->freeFrame(src);
@@ -1581,6 +1596,10 @@ static void VS_CC blankClipFree(void *instanceData, VSCore *core, const VSAPI *v
     free(d);
 }
 
+#if VS_FEATURE_CUDA
+extern void VS_CC blankClipProcessCUDA(void *color, const BlankClipData *d, VSCore *core, const VSAPI *vsapi);
+#endif
+
 static void VS_CC blankClipCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
     BlankClipData d;
     BlankClipData *data;
@@ -1709,19 +1728,32 @@ static void VS_CC blankClipCreate(const VSMap *in, VSMap *out, void *userData, V
         RETERROR("BlankClip: invalid number of color values specified");
     }
 
-    d.f = vsapi->newVideoFrame(d.vi.format, d.vi.width, d.vi.height, 0, core);
+    int gpu = vsapi->propGetInt(in, "gpu", 0, &err);
 
-    for (plane = 0; plane < d.vi.format->numPlanes; plane++) {
-        switch (d.vi.format->bytesPerSample) {
-        case 1:
-			vs_memset8(vsapi->getWritePtr(d.f, plane), color.i[plane], vsapi->getStride(d.f, plane) * vsapi->getFrameHeight(d.f, plane));
-            break;
-        case 2:
-			vs_memset16(vsapi->getWritePtr(d.f, plane), color.i[plane], vsapi->getStride(d.f, plane) * vsapi->getFrameHeight(d.f, plane) / 2);
-            break;
-        case 4:
-			vs_memset32(vsapi->getWritePtr(d.f, plane), color.i[plane], vsapi->getStride(d.f, plane) * vsapi->getFrameHeight(d.f, plane) / 4);
-            break;
+    if (err) {
+        gpu = 0; //CPU
+    }
+
+    if (gpu) {
+#if VS_FEATURE_CUDA
+        d.f = vsapi->newVideoFrameAtLocation(d.vi.format, d.vi.width, d.vi.height, 0, core, flGPU);
+        blankClipProcessCUDA(&color, &d, core, vsapi);
+#endif
+    } else {
+        d.f = vsapi->newVideoFrame(d.vi.format, d.vi.width, d.vi.height, 0, core);
+
+        for (plane = 0; plane < d.vi.format->numPlanes; plane++) {
+            switch (d.vi.format->bytesPerSample) {
+            case 1:
+                vs_memset8(vsapi->getWritePtr(d.f, plane), color.i[plane], vsapi->getStride(d.f, plane) * vsapi->getFrameHeight(d.f, plane));
+                break;
+            case 2:
+                vs_memset16(vsapi->getWritePtr(d.f, plane), color.i[plane], vsapi->getStride(d.f, plane) * vsapi->getFrameHeight(d.f, plane) / 2);
+                break;
+            case 4:
+                vs_memset32(vsapi->getWritePtr(d.f, plane), color.i[plane], vsapi->getStride(d.f, plane) * vsapi->getFrameHeight(d.f, plane) / 4);
+                break;
+            }
         }
     }
 
@@ -1822,6 +1854,10 @@ typedef struct {
     int process[3];
 } LutData;
 
+#if VS_FEATURE_CUDA
+extern void VS_CC lutProcessCUDA(const VSFrameRef *src, VSFrameRef *dst, const LutData *d, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi);
+#endif
+
 static void VS_CC lutInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
     LutData *d = (LutData *) * instanceData;
     vsapi->setVideoInfo(d->vi, 1, node);
@@ -1839,40 +1875,51 @@ static const VSFrameRef *VS_CC lutGetframe(int n, int activationReason, void **i
         const VSFormat *fi = vsapi->getFrameFormat(src);
         const int pl[] = {0, 1, 2};
         const VSFrameRef *fr[] = {d->process[0] ? 0 : src, d->process[1] ? 0 : src, d->process[2] ? 0 : src};
-        VSFrameRef *dst = vsapi->newVideoFrame2(fi, vsapi->getFrameWidth(src, 0), vsapi->getFrameHeight(src, 0), fr, pl, src, core);
+        const FrameLocation fLocation = vsapi->getFrameLocation(src);
 
-        for (plane = 0; plane < fi->numPlanes; plane++) {
-            const uint8_t *srcp = vsapi->getReadPtr(src, plane);
-            int src_stride = vsapi->getStride(src, plane);
-            uint8_t *dstp = vsapi->getWritePtr(dst, plane);
-            int dst_stride = vsapi->getStride(dst, plane);
-            int h = vsapi->getFrameHeight(src, plane);
+        VSFrameRef *dst = NULL;
 
-            if (d->process[plane]) {
+        if (fLocation == flGPU) {
+#if VS_FEATURE_CUDA
+            dst = vsapi->newVideoFrameAtLocation2(fi, vsapi->getFrameWidth(src, 0), vsapi->getFrameHeight(src, 0), fr, pl, src, core, fLocation);
+            lutProcessCUDA(src, dst, d, frameCtx, core, vsapi);
+#endif
+        } else {
+            dst = vsapi->newVideoFrame2(fi, vsapi->getFrameWidth(src, 0), vsapi->getFrameHeight(src, 0), fr, pl, src, core);
 
-                int hl;
-                int w = vsapi->getFrameWidth(src, plane);
-                int x;
+            for (plane = 0; plane < fi->numPlanes; plane++) {
+                const uint8_t *srcp = vsapi->getReadPtr(src, plane);
+                int src_stride = vsapi->getStride(src, plane);
+                uint8_t *dstp = vsapi->getWritePtr(dst, plane);
+                int dst_stride = vsapi->getStride(dst, plane);
+                int h = vsapi->getFrameHeight(src, plane);
 
-                if (fi->bytesPerSample == 1) {
-                    const uint8_t *lut = (uint8_t *)d->lut;
+                if (d->process[plane]) {
 
-                    for (hl = 0; hl < h; hl++) {
-                        for (x = 0; x < w; x++)
-                            dstp[x] =  lut[srcp[x]];
+                    int hl;
+                    int w = vsapi->getFrameWidth(src, plane);
+                    int x;
 
-                        dstp += dst_stride;
-                        srcp += src_stride;
-                    }
-                } else {
-                    const uint16_t *lut = (uint16_t *)d->lut;
+                    if (fi->bytesPerSample == 1) {
+                        const uint8_t *lut = (uint8_t *)d->lut;
 
-                    for (hl = 0; hl < h; hl++) {
-                        for (x = 0; x < w; x++)
-                            ((uint16_t *)dstp)[x] =  lut[((uint16_t *)srcp)[x]];
+                        for (hl = 0; hl < h; hl++) {
+                            for (x = 0; x < w; x++)
+                                dstp[x] =  lut[srcp[x]];
 
-                        dstp += dst_stride;
-                        srcp += src_stride;
+                            dstp += dst_stride;
+                            srcp += src_stride;
+                        }
+                    } else {
+                        const uint16_t *lut = (uint16_t *)d->lut;
+
+                        for (hl = 0; hl < h; hl++) {
+                            for (x = 0; x < w; x++)
+                                ((uint16_t *)dstp)[x] =  lut[((uint16_t *)srcp)[x]];
+
+                            dstp += dst_stride;
+                            srcp += src_stride;
+                        }
                     }
                 }
             }
@@ -2623,6 +2670,10 @@ static void VS_CC transposeInit(VSMap *in, VSMap *out, void **instanceData, VSNo
     vsapi->setVideoInfo(&d->vi, 1, node);
 }
 
+#if VS_FEATURE_CUDA
+extern void VS_CC transposeProcessCUDA(const VSFrameRef *src, VSFrameRef *dst, const TransposeData *d, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi);
+#endif
+
 static const VSFrameRef *VS_CC transposeGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     TransposeData *d = (TransposeData *) * instanceData;
 
@@ -2630,7 +2681,7 @@ static const VSFrameRef *VS_CC transposeGetFrame(int n, int activationReason, vo
         vsapi->requestFrameFilter(n, d->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
         const VSFrameRef *src = vsapi->getFrameFilter(n, d->node, frameCtx);
-        VSFrameRef *dst = vsapi->newVideoFrame(d->vi.format, d->vi.width, d->vi.height, src, core);
+        VSFrameRef *dst;
         int plane;
         int x;
         int y;
@@ -2641,80 +2692,90 @@ static const VSFrameRef *VS_CC transposeGetFrame(int n, int activationReason, vo
         uint8_t *dstp;
         int dst_stride;
         int partial_lines;
+        FrameLocation fLocation = vsapi->getFrameLocation(src);
 
-        for (plane = 0; plane < d->vi.format->numPlanes; plane++) {
-            width = vsapi->getFrameWidth(src, plane);
-            height = vsapi->getFrameHeight(src, plane);
-            srcp = vsapi->getReadPtr(src, plane);
-            src_stride = vsapi->getStride(src, plane);
-            dstp = vsapi->getWritePtr(dst, plane);
-            dst_stride = vsapi->getStride(dst, plane);
-
-            switch (d->vi.format->bytesPerSample) {
-            case 1:
-#ifdef VS_TARGET_CPU_X86
-                modwidth = width & ~7;
-                modheight = height & ~7;
-
-                for (y = 0; y < modheight; y += 8) {
-                    for (x = 0; x < modwidth; x += 8)
-                        vs_transpose_byte(srcp + src_stride * y + x, src_stride, dstp + dst_stride * x + y, dst_stride);
-
-                    partial_lines = width - modwidth;
-
-                    if (partial_lines > 0)
-                        vs_transpose_byte_partial(srcp + src_stride * y + x, src_stride, dstp + dst_stride * x + y, dst_stride, partial_lines);
-                }
-
-                for (y = modheight; y < height; y++)
-                    for (x = 0; x < width; x++)
-                        dstp[dst_stride * x + y] = srcp[src_stride * y + x];
-
-                break;
-#else
-                for (y = 0; y < height; y++)
-                    for (x = 0; x < width; x++)
-                        dstp[dst_stride * x + y] = srcp[src_stride * y + x];
-                break;
+        if (fLocation == flGPU) {
+#if VS_FEATURE_CUDA
+            dst = vsapi->newVideoFrameAtLocation(d->vi.format, d->vi.width, d->vi.height, src, core, fLocation);
+            transposeProcessCUDA(src, dst, d, frameCtx, core, vsapi);
 #endif
-            case 2:
+        } else {
+            dst = vsapi->newVideoFrame(d->vi.format, d->vi.width, d->vi.height, src, core);
+
+            for (plane = 0; plane < d->vi.format->numPlanes; plane++) {
+                width = vsapi->getFrameWidth(src, plane);
+                height = vsapi->getFrameHeight(src, plane);
+                srcp = vsapi->getReadPtr(src, plane);
+                src_stride = vsapi->getStride(src, plane);
+                dstp = vsapi->getWritePtr(dst, plane);
+                dst_stride = vsapi->getStride(dst, plane);
+
+                switch (d->vi.format->bytesPerSample) {
+                case 1:
 #ifdef VS_TARGET_CPU_X86
-                modwidth = width & ~3;
-                modheight = height & ~3;
+                    modwidth = width & ~7;
+                    modheight = height & ~7;
 
-                for (y = 0; y < modheight; y += 4) {
-                    for (x = 0; x < modwidth; x += 4)
-                        vs_transpose_word(srcp + src_stride * y + x * 2, src_stride, dstp + dst_stride * x + y * 2, dst_stride);
+                    for (y = 0; y < modheight; y += 8) {
+                        for (x = 0; x < modwidth; x += 8)
+                            vs_transpose_byte(srcp + src_stride * y + x, src_stride, dstp + dst_stride * x + y, dst_stride);
 
-                    partial_lines = width - modwidth;
+                        partial_lines = width - modwidth;
 
-                    if (partial_lines > 0)
-                        vs_transpose_word_partial(srcp + src_stride * y + x * 2, src_stride, dstp + dst_stride * x + y * 2, dst_stride, partial_lines);
-                }
+                        if (partial_lines > 0)
+                            vs_transpose_byte_partial(srcp + src_stride * y + x, src_stride, dstp + dst_stride * x + y, dst_stride, partial_lines);
+                    }
 
-                src_stride /= 2;
-                dst_stride /= 2;
+                    for (y = modheight; y < height; y++)
+                        for (x = 0; x < width; x++)
+                            dstp[dst_stride * x + y] = srcp[src_stride * y + x];
 
-                for (y = modheight; y < height; y++)
-                    for (x = 0; x < width; x++)
-                        ((uint16_t *)dstp)[dst_stride * x + y] = ((const uint16_t *)srcp)[src_stride * y + x];
-
-                break;
+                    break;
 #else
-                src_stride /= 2;
-                dst_stride /= 2;
-                for (y = 0; y < height; y++)
-                    for (x = 0; x < width; x++)
-                        ((uint16_t *)dstp)[dst_stride * x + y] = ((const uint16_t *)srcp)[src_stride * y + x];
-                break;
+                    for (y = 0; y < height; y++)
+                        for (x = 0; x < width; x++)
+                            dstp[dst_stride * x + y] = srcp[src_stride * y + x];
+                    break;
 #endif
-            case 4:
-                src_stride /= 4;
-                dst_stride /= 4;
-                for (y = 0; y < height; y++)
-                    for (x = 0; x < width; x++)
-                        ((uint32_t *)dstp)[dst_stride * x + y] = ((const uint32_t *)srcp)[src_stride * y + x];
-                break;
+                case 2:
+#ifdef VS_TARGET_CPU_X86
+                    modwidth = width & ~3;
+                    modheight = height & ~3;
+
+                    for (y = 0; y < modheight; y += 4) {
+                        for (x = 0; x < modwidth; x += 4)
+                            vs_transpose_word(srcp + src_stride * y + x * 2, src_stride, dstp + dst_stride * x + y * 2, dst_stride);
+
+                        partial_lines = width - modwidth;
+
+                        if (partial_lines > 0)
+                            vs_transpose_word_partial(srcp + src_stride * y + x * 2, src_stride, dstp + dst_stride * x + y * 2, dst_stride, partial_lines);
+                    }
+
+                    src_stride /= 2;
+                    dst_stride /= 2;
+
+                    for (y = modheight; y < height; y++)
+                        for (x = 0; x < width; x++)
+                            ((uint16_t *)dstp)[dst_stride * x + y] = ((const uint16_t *)srcp)[src_stride * y + x];
+
+                    break;
+#else
+                    src_stride /= 2;
+                    dst_stride /= 2;
+                    for (y = 0; y < height; y++)
+                        for (x = 0; x < width; x++)
+                            ((uint16_t *)dstp)[dst_stride * x + y] = ((const uint16_t *)srcp)[src_stride * y + x];
+                    break;
+#endif
+                case 4:
+                    src_stride /= 4;
+                    dst_stride /= 4;
+                    for (y = 0; y < height; y++)
+                        for (x = 0; x < width; x++)
+                            ((uint32_t *)dstp)[dst_stride * x + y] = ((const uint32_t *)srcp)[src_stride * y + x];
+                    break;
+                }
             }
         }
 
@@ -2933,7 +2994,7 @@ static const VSFrameRef *VS_CC planeAverageGetFrame(int n, int activationReason,
             }
             break;
         }
-        
+
         vsapi->propSetFloat(vsapi->getFramePropsRW(dst), d->prop, acc / (double)(width * height * (((int64_t)1 << d->vi->format->bitsPerSample) - 1)), paReplace);
 
         vsapi->freeFrame(src);
@@ -3022,9 +3083,9 @@ static const VSFrameRef *VS_CC planeDifferenceGetFrame(int n, int activationReas
             }
             break;
         }
-        
+
         vsapi->propSetFloat(vsapi->getFramePropsRW(dst), d->prop, acc / (double)(width * height * (((int64_t)1 << d->vi->format->bitsPerSample) - 1)), paReplace);
-        
+
         vsapi->freeFrame(src1);
         vsapi->freeFrame(src2);
         return dst;
@@ -3229,6 +3290,10 @@ typedef struct {
 
 const int MergeShift = 15;
 
+#if VS_FEATURE_CUDA
+extern void mergeProcessCUDA(const VSFrameRef *src1, const VSFrameRef *src2, VSFrameRef *dst, const MergeData *d, const int MergeShift, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi);
+#endif
+
 static void VS_CC mergeInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
     MergeData *d = (MergeData *)*instanceData;
     vsapi->setVideoInfo(d->vi, 1, node);
@@ -3246,48 +3311,60 @@ static const VSFrameRef *VS_CC mergeGetFrame(int n, int activationReason, void *
         const int pl[] = {0, 1, 2};
         const VSFrameRef *fs[] = { 0, src1, src2 };
         const VSFrameRef *fr[] = {fs[d->process[0]], fs[d->process[1]], fs[d->process[2]]};
-        VSFrameRef *dst = vsapi->newVideoFrame2(d->vi->format, d->vi->width, d->vi->height, fr, pl, src1, core);
-        int plane;
-        int x, y;
-        for (plane = 0; plane < d->vi->format->numPlanes; plane++) {
-            if (d->process[plane] == 0) {
-                int weight = d->weight[plane];
-                float fweight = d->fweight[plane];
-                int h = vsapi->getFrameHeight(src1, plane);
-                int w = vsapi->getFrameWidth(src2, plane);
-                int stride = vsapi->getStride(src1, plane);
-                const uint8_t *srcp1 = vsapi->getReadPtr(src1, plane);
-                const uint8_t *srcp2 = vsapi->getReadPtr(src2, plane);
-                uint8_t *dstp = vsapi->getWritePtr(dst, plane);
+        const FrameLocation fLocation = vsapi->getFrameLocation(src1);
+        VSFrameRef *dst = NULL;
 
-                if (d->vi->format->sampleType == stInteger) {
-                    const int round = 1 << (MergeShift - 1);
-                    if (d->vi->format->bytesPerSample == 1) {
-                        for (y = 0; y < h; y++) {
-                            for (x = 0; x < w; x++)
-                                dstp[x] = srcp1[x] + (((srcp2[x] - srcp1[x]) * weight + round) >> MergeShift);
-                            srcp1 += stride;
-                            srcp2 += stride;
-                            dstp += stride;
-                        }
-                    } else if (d->vi->format->bytesPerSample == 2) {
+        if (fLocation == flGPU) {
+#if VS_FEATURE_CUDA
+            dst = vsapi->newVideoFrameAtLocation2(d->vi->format, d->vi->width, d->vi->height, fr, pl, src1, core, fLocation);
+            mergeProcessCUDA(src1, src2, dst, d, MergeShift, frameCtx, core, vsapi);
+#endif
+        }
+        else {
+            dst = vsapi->newVideoFrame2(d->vi->format, d->vi->width, d->vi->height, fr, pl, src1, core);
+
+            int plane;
+            int x, y;
+            for (plane = 0; plane < d->vi->format->numPlanes; plane++) {
+                if (d->process[plane] == 0) {
+                    int weight = d->weight[plane];
+                    float fweight = d->fweight[plane];
+                    int h = vsapi->getFrameHeight(src1, plane);
+                    int w = vsapi->getFrameWidth(src2, plane);
+                    int stride = vsapi->getStride(src1, plane);
+                    const uint8_t *srcp1 = vsapi->getReadPtr(src1, plane);
+                    const uint8_t *srcp2 = vsapi->getReadPtr(src2, plane);
+                    uint8_t *dstp = vsapi->getWritePtr(dst, plane);
+
+                    if (d->vi->format->sampleType == stInteger) {
                         const int round = 1 << (MergeShift - 1);
-                        for (y = 0; y < h; y++) {
-                            for (x = 0; x < w; x++)
-                                ((uint16_t *)dstp)[x] = ((const uint16_t *)srcp1)[x] + (((((const uint16_t *)srcp2)[x] - ((const uint16_t *)srcp1)[x]) * weight + round) >> MergeShift);
-                            srcp1 += stride;
-                            srcp2 += stride;
-                            dstp += stride;
+                        if (d->vi->format->bytesPerSample == 1) {
+                            for (y = 0; y < h; y++) {
+                                for (x = 0; x < w; x++)
+                                    dstp[x] = srcp1[x] + (((srcp2[x] - srcp1[x]) * weight + round) >> MergeShift);
+                                srcp1 += stride;
+                                srcp2 += stride;
+                                dstp += stride;
+                            }
+                        } else if (d->vi->format->bytesPerSample == 2) {
+                            const int round = 1 << (MergeShift - 1);
+                            for (y = 0; y < h; y++) {
+                                for (x = 0; x < w; x++)
+                                    ((uint16_t *)dstp)[x] = ((const uint16_t *)srcp1)[x] + (((((const uint16_t *)srcp2)[x] - ((const uint16_t *)srcp1)[x]) * weight + round) >> MergeShift);
+                                srcp1 += stride;
+                                srcp2 += stride;
+                                dstp += stride;
+                            }
                         }
-                    }
-                } else if (d->vi->format->sampleType == stFloat) {
-                    if (d->vi->format->bytesPerSample == 4) {
-                        for (y = 0; y < h; y++) {
-                            for (x = 0; x < w; x++)
-                                ((float *)dstp)[x] = (((const float *)srcp1)[x] + (((const float *)srcp2)[x] - ((const float *)srcp1)[x]) * fweight);
-                            srcp1 += stride;
-                            srcp2 += stride;
-                            dstp += stride;
+                    } else if (d->vi->format->sampleType == stFloat) {
+                        if (d->vi->format->bytesPerSample == 4) {
+                            for (y = 0; y < h; y++) {
+                                for (x = 0; x < w; x++)
+                                    ((float *)dstp)[x] = (((const float *)srcp1)[x] + (((const float *)srcp2)[x] - ((const float *)srcp1)[x]) * fweight);
+                                srcp1 += stride;
+                                srcp2 += stride;
+                                dstp += stride;
+                            }
                         }
                     }
                 }
@@ -3395,6 +3472,10 @@ typedef struct {
     int process[3];
 } MaskedMergeData;
 
+#if VS_FEATURE_CUDA
+extern void VS_CC maskedMergeProcessCUDA(const VSFrameRef *src1, const VSFrameRef *src2, VSFrameRef *dst, const VSFrameRef *mask, const VSFrameRef *mask23, const MaskedMergeData *d, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi);
+#endif
+
 static void VS_CC maskedMergeInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
     MaskedMergeData *d = (MaskedMergeData *) * instanceData;
     vsapi->setVideoInfo(d->vi, 1, node);
@@ -3416,53 +3497,65 @@ static const VSFrameRef *VS_CC maskedMergeGetFrame(int n, int activationReason, 
         const VSFrameRef *mask23 = 0;
         const int pl[] = {0, 1, 2};
         const VSFrameRef *fr[] = {d->process[0] ? 0 : src1, d->process[1] ? 0 : src1, d->process[2] ? 0 : src1};
-        VSFrameRef *dst = vsapi->newVideoFrame2(d->vi->format, d->vi->width, d->vi->height, fr, pl, src1, core);
         int plane;
         int x, y;
         if (d->mask23)
            mask23 = vsapi->getFrameFilter(n, d->mask23, frameCtx);
-        for (plane = 0; plane < d->vi->format->numPlanes; plane++) {
-            if (d->process[plane]) {
-                int h = vsapi->getFrameHeight(src1, plane);
-                int w = vsapi->getFrameWidth(src2, plane);
-                int stride = vsapi->getStride(src1, plane);
-                const uint8_t *srcp1 = vsapi->getReadPtr(src1, plane);
-                const uint8_t *srcp2 = vsapi->getReadPtr(src2, plane);
-                const uint8_t *maskp = vsapi->getReadPtr((plane && mask23) ? mask23 : mask, d->first_plane ? 0 : plane);
-                uint8_t *dstp = vsapi->getWritePtr(dst, plane);
 
-                if (d->vi->format->sampleType == stInteger) {
-                    if (d->vi->format->bytesPerSample == 1) {
-                        for (y = 0; y < h; y++) {
-                            for (x = 0; x < w; x++)
-                                dstp[x] = srcp1[x] + (((srcp2[x] - srcp1[x]) * (maskp[x] > 2 ? maskp[x] + 1 : maskp[x]) + 128) >> 8);
-                            srcp1 += stride;
-                            srcp2 += stride;
-                            maskp += stride;
-                            dstp += stride;
+        const FrameLocation fLocation = vsapi->getFrameLocation(src1);
+        VSFrameRef *dst = 0;
+
+        if (fLocation == flGPU) {
+#if VS_FEATURE_CUDA
+            dst = vsapi->newVideoFrameAtLocation2(d->vi->format, d->vi->width, d->vi->height, fr, pl, src1, core, fLocation);
+            maskedMergeProcessCUDA(src1, src2, dst, mask, mask23, d, frameCtx, core, vsapi);
+#endif
+        } else {
+            dst = vsapi->newVideoFrame2(d->vi->format, d->vi->width, d->vi->height, fr, pl, src1, core);
+
+            for (plane = 0; plane < d->vi->format->numPlanes; plane++) {
+                if (d->process[plane]) {
+                    int h = vsapi->getFrameHeight(src1, plane);
+                    int w = vsapi->getFrameWidth(src2, plane);
+                    int stride = vsapi->getStride(src1, plane);
+                    const uint8_t *srcp1 = vsapi->getReadPtr(src1, plane);
+                    const uint8_t *srcp2 = vsapi->getReadPtr(src2, plane);
+                    const uint8_t *maskp = vsapi->getReadPtr((plane && mask23) ? mask23 : mask, d->first_plane ? 0 : plane);
+                    uint8_t *dstp = vsapi->getWritePtr(dst, plane);
+
+                    if (d->vi->format->sampleType == stInteger) {
+                        if (d->vi->format->bytesPerSample == 1) {
+                            for (y = 0; y < h; y++) {
+                                for (x = 0; x < w; x++)
+                                    dstp[x] = srcp1[x] + (((srcp2[x] - srcp1[x]) * (maskp[x] > 2 ? maskp[x] + 1 : maskp[x]) + 128) >> 8);
+                                srcp1 += stride;
+                                srcp2 += stride;
+                                maskp += stride;
+                                dstp += stride;
+                            }
+                        } else if (d->vi->format->bytesPerSample == 2) {
+                            int shift = d->vi->format->bitsPerSample;
+                            int round = 1 << (shift - 1);
+                            for (y = 0; y < h; y++) {
+                                for (x = 0; x < w; x++)
+                                    ((uint16_t *)dstp)[x] = ((const uint16_t *)srcp1)[x] + (((((const uint16_t *)srcp2)[x]
+                                        - ((const uint16_t *)srcp1)[x]) * (((const uint16_t *)maskp)[x] > 2 ? ((const uint16_t *)maskp)[x] + 1 : ((const uint16_t *)maskp)[x]) + round) >> shift);
+                                srcp1 += stride;
+                                srcp2 += stride;
+                                maskp += stride;
+                                dstp += stride;
+                            }
                         }
-                    } else if (d->vi->format->bytesPerSample == 2) {
-                        int shift = d->vi->format->bitsPerSample;
-                        int round = 1 << (shift - 1);
-                        for (y = 0; y < h; y++) {
-                            for (x = 0; x < w; x++)
-                                ((uint16_t *)dstp)[x] = ((const uint16_t *)srcp1)[x] + (((((const uint16_t *)srcp2)[x]
-                                    - ((const uint16_t *)srcp1)[x]) * (((const uint16_t *)maskp)[x] > 2 ? ((const uint16_t *)maskp)[x] + 1 : ((const uint16_t *)maskp)[x]) + round) >> shift);
-                            srcp1 += stride;
-                            srcp2 += stride;
-                            maskp += stride;
-                            dstp += stride;
-                        }
-                    }
-                } else if (d->vi->format->sampleType == stFloat) {
-                    if (d->vi->format->bytesPerSample == 4) {
-                        for (y = 0; y < h; y++) {
-                            for (x = 0; x < w; x++)
-                                ((float *)dstp)[x] = ((const float *)srcp1)[x] + ((((const float *)srcp2)[x] - ((const float *)srcp1)[x]) * ((const float *)maskp)[x]);
-                            srcp1 += stride;
-                            srcp2 += stride;
-                            maskp += stride;
-                            dstp += stride;
+                    } else if (d->vi->format->sampleType == stFloat) {
+                        if (d->vi->format->bytesPerSample == 4) {
+                            for (y = 0; y < h; y++) {
+                                for (x = 0; x < w; x++)
+                                    ((float *)dstp)[x] = ((const float *)srcp1)[x] + ((((const float *)srcp2)[x] - ((const float *)srcp1)[x]) * ((const float *)maskp)[x]);
+                                srcp1 += stride;
+                                srcp2 += stride;
+                                maskp += stride;
+                                dstp += stride;
+                            }
                         }
                     }
                 }
@@ -3578,6 +3671,92 @@ static void VS_CC maskedMergeCreate(const VSMap *in, VSMap *out, void *userData,
     vsapi->createFilter(in, out, "MaskedMerge", maskedMergeInit, maskedMergeGetFrame, maskedMergeFree, fmParallel, 0, data, core);
 }
 
+#if VS_FEATURE_CUDA
+///////////////////////////////
+// TransferFrame
+typedef struct {
+    VSNodeRef *node;
+    const VSVideoInfo *vi;
+    int direction; // 0 = to Host, 1 = to GPU.
+} TransferFrameData;
+
+static void VS_CC transferFrameInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
+    TransferFrameData *d = (TransferFrameData *) * instanceData;
+    vsapi->setVideoInfo(d->vi, 1, node);
+}
+
+static const VSFrameRef *VS_CC transferFrameGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+    TransferFrameData *d = (TransferFrameData *) * instanceData;
+
+    if (activationReason == arInitial) {
+        vsapi->requestFrameFilter(n, d->node, frameCtx);
+    } else if (activationReason == arAllFramesReady) {
+        const VSFrameRef *src = vsapi->getFrameFilter(n, d->node, frameCtx);
+        const VSFormat *fi = d->vi->format;
+        int height = vsapi->getFrameHeight(src, 0);
+        int width = vsapi->getFrameWidth(src, 0);
+
+        if (d->direction == 0) {
+            //Create a new CPU/Host frame.
+            if (vsapi->getFrameLocation(src) == flLocal) {
+                vsapi->setFilterError("TransferFrame: Attempted to transfer a CPU frame to a CPU frame. Check your direction.", frameCtx);
+                vsapi->freeNode(d->node);
+                return 0;
+            }
+            VSFrameRef *src_cpu = vsapi->newVideoFrame(fi, width, height, src, core);
+            vsapi->transferVideoFrame(src, src_cpu, ftdGPUtoCPU, core);
+            vsapi->freeFrame(src);
+
+            return src_cpu;
+
+        } else {
+            //Create a new GPU/Device frame.
+            if (vsapi->getFrameLocation(src) == flGPU) {
+                vsapi->setFilterError("TransferFrame: Attempted to transfer a GPU frame to a GPU frame. Check your direction.", frameCtx);
+                vsapi->freeNode(d->node);
+                return 0;
+            }
+
+            VSFrameRef *src_gpu = vsapi->newVideoFrameAtLocation(fi, width, height, src, core, flGPU);
+            vsapi->transferVideoFrame(src, src_gpu, ftdCPUtoGPU, core);
+            vsapi->freeFrame(src);
+
+            return src_gpu;
+        }
+    }
+
+    return 0;
+}
+
+static void VS_CC transferFrameFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
+    TransferFrameData *d = (TransferFrameData *)instanceData;
+    vsapi->freeNode(d->node);
+    free(d);
+}
+
+static void VS_CC transferFrameCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+    TransferFrameData d;
+    TransferFrameData *data;
+    int err;
+
+    d.node = vsapi->propGetNode(in, "clip", 0, 0);
+    d.vi = vsapi->getVideoInfo(d.node);
+
+    d.direction = vsapi->propGetInt(in, "direction", 0, &err);
+    if(err || (d.direction < 0 || d.direction > 1)) {
+        vsapi->setError(out, "TransferFrame: Direction must be specified and must be either 0 or 1.");
+        vsapi->freeNode(d.node);
+        return;
+    }
+
+    data = (TransferFrameData *)malloc(sizeof(d));
+    *data = d;
+
+    vsapi->createFilter(in, out, "TransferFrame", transferFrameInit, transferFrameGetFrame, transferFrameFree, fmParallel, 0, data, core);
+    return;
+}
+#endif
+
 //////////////////////////////////////////
 // Init
 
@@ -3600,7 +3779,7 @@ void VS_CC stdlibInitialize(VSConfigPlugin configFunc, VSRegisterFunction regist
     registerFunc("Turn180", "clip:clip;", flipHorizontalCreate, (void *)1, plugin);
     registerFunc("StackVertical", "clips:clip[];", stackCreate, (void *)1, plugin);
     registerFunc("StackHorizontal", "clips:clip[];", stackCreate, 0, plugin);
-    registerFunc("BlankClip", "clip:clip:opt;width:int:opt;height:int:opt;format:int:opt;length:int:opt;fpsnum:int:opt;fpsden:int:opt;color:float[]:opt;", blankClipCreate, 0, plugin);
+    registerFunc("BlankClip", "clip:clip:opt;width:int:opt;height:int:opt;format:int:opt;length:int:opt;fpsnum:int:opt;fpsden:int:opt;color:float[]:opt;gpu:int:opt;", blankClipCreate, 0, plugin);
     registerFunc("AssumeFPS", "clip:clip;src:clip:opt;fpsnum:int:opt;fpsden:int:opt;", assumeFPSCreate, 0, plugin);
     registerFunc("Lut", "clip:clip;planes:int[];lut:int[]:opt;function:func:opt;", lutCreate, 0, plugin);
     registerFunc("Lut2", "clips:clip[];planes:int[];lut:int[]:opt;function:func:opt;bits:int:opt;", lut2Create, 0, plugin);
@@ -3614,4 +3793,7 @@ void VS_CC stdlibInitialize(VSConfigPlugin configFunc, VSRegisterFunction regist
     registerFunc("PropToClip", "clip:clip;prop:data:opt;", propToClipCreate, 0, plugin);
     registerFunc("Merge", "clips:clip[];weight:float[]:opt;", mergeCreate, 0, plugin);
     registerFunc("MaskedMerge", "clips:clip[];mask:clip;planes:int[]:opt;first_plane:int:opt;", maskedMergeCreate, 0, plugin);
+#if VS_FEATURE_CUDA
+    registerFunc("TransferFrame", "clip:clip;direction:int;", transferFrameCreate, 0, plugin);
+#endif
 }

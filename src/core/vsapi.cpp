@@ -129,6 +129,10 @@ static VSFrameRef *VS_CC newVideoFrame(const VSFormat *format, int width, int he
     return new VSFrameRef(core->newVideoFrame(format, width, height, propSrc ? propSrc->frame.data() : NULL));
 }
 
+static FrameLocation VS_CC getFrameLocation(const VSFrameRef *f) {
+    return f->frame->getFrameLocation();
+}
+
 static VSFrameRef *VS_CC newVideoFrame2(const VSFormat *format, int width, int height, const VSFrameRef **planeSrc, const int *planes, const VSFrameRef *propSrc, VSCore *core) {
     Q_ASSERT(format);
     VSFrame *fp[3];
@@ -549,6 +553,29 @@ static void VS_CC setMessageHandler(VSMessageHandler handler) {
     }
 }
 
+#if VS_FEATURE_CUDA
+static VSFrameRef *VS_CC newVideoFrameAtLocation(const VSFormat *format, int width, int height, const VSFrameRef *propSrc, VSCore *core, FrameLocation fLocation) {
+    Q_ASSERT(format);
+    return new VSFrameRef(core->newVideoFrame(format, width, height, propSrc ? propSrc->frame.data() : NULL, fLocation));
+}
+
+static VSFrameRef *VS_CC newVideoFrameAtLocation2(const VSFormat *format, int width, int height, const VSFrameRef **planeSrc, const int *planes, const VSFrameRef *propSrc, VSCore *core, FrameLocation fLocation) {
+    Q_ASSERT(format);
+    VSFrame *fp[3];
+    for (int i = 0; i < format->numPlanes; i++)
+        fp[i] = planeSrc[i] ? planeSrc[i]->frame.data() : NULL;
+    return new VSFrameRef(core->newVideoFrame(format, width, height, fp, planes, propSrc ? propSrc->frame.data() : NULL, fLocation));
+}
+
+static void VS_CC transferVideoFrame(const VSFrameRef *srcFrame, VSFrameRef *dstFrame, FrameTransferDirection direction, VSCore *core){
+    core->transferVideoFrame(srcFrame->frame, dstFrame->frame, direction);
+}
+
+static const VSCUDAStream *VS_CC getStream(const VSFrameRef *frame, int plane) {
+    return frame->frame->getStream(plane);
+}
+#endif
+
 const VSAPI vsapi = {
     &createCore,
     &freeCore,
@@ -625,6 +652,15 @@ const VSAPI vsapi = {
     &setMaxCacheSize,
     &getOutputIndex,
     &newVideoFrame2,
+
+    &getFrameLocation,
+
+#if VS_FEATURE_CUDA
+    &newVideoFrameAtLocation,
+    &newVideoFrameAtLocation2,
+    &transferVideoFrame,
+    &getStream,
+#endif
 
     &setMessageHandler
 };
