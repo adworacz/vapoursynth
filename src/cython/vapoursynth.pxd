@@ -54,10 +54,10 @@ cdef extern from "include/VapourSynth.h" nogil:
 
         pfGray8 = cmGray + 10
         pfGray16
-        
+
         pfGrayH
         pfGrayS
-    
+
         pfYUV420P8 = cmYUV + 10
         pfYUV422P8
         pfYUV444P8
@@ -76,7 +76,7 @@ cdef extern from "include/VapourSynth.h" nogil:
         pfYUV420P16
         pfYUV422P16
         pfYUV444P16
-        
+
         pfYUV444PH
         pfYUV444PS
 
@@ -84,7 +84,7 @@ cdef extern from "include/VapourSynth.h" nogil:
         pfRGB27
         pfRGB30
         pfRGB48
-        
+
         pfRGBH
         pfRGBS
 
@@ -108,15 +108,15 @@ cdef extern from "include/VapourSynth.h" nogil:
         int subSamplingH
         int numPlanes
 
-    cdef enum NodeFlags:
+    cdef enum VSNodeFlags:
         nfNoCache = 1
 
-    cdef enum GetPropErrors:
+    cdef enum VSGetPropErrors:
         peUnset = 1
         peType  = 2
         peIndex = 4
-        
-    cdef enum PropAppendMode:
+
+    cdef enum VSPropAppendMode:
         paReplace = 0
         paAppend  = 1
         paTouch   = 2
@@ -138,11 +138,17 @@ cdef extern from "include/VapourSynth.h" nogil:
         int fpsDen
         int flags
 
-    cdef enum ActivationReason:
+    cdef enum VSActivationReason:
         arInitial = 0
         arFrameReady = 1
         arAllFramesReady = 2
         arError = -1
+        
+    cdef enum VSMessageType:
+        mtDebug = 0,
+        mtWarning = 1,
+        mtCritical = 2,
+        mtFatal = 3
 
     ctypedef void (__stdcall *VSFrameDoneCallback)(void *userData, const VSFrameRef *f, int n, VSNodeRef *node, const char *errorMsg)
     ctypedef void (__stdcall *VSFilterFree)(void *instanceData, VSCore *core, const VSAPI *vsapi)
@@ -151,8 +157,8 @@ cdef extern from "include/VapourSynth.h" nogil:
     ctypedef const VSFrameRef *(__stdcall *VSFilterGetFrame)(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi)
     ctypedef void (__stdcall *VSFilterFree)(void *instanceData, VSCore *core, const VSAPI *vsapi)
     ctypedef void (__stdcall *VSFreeFuncData)(void *userData)
-    ctypedef void (__stdcall *VSMessageHandler)(int msgType, const char *msg)
-    
+    ctypedef void (__stdcall *VSMessageHandler)(int msgType, const char *msg, void *userData)
+
     ctypedef struct VSAPI:
         VSCore *createCore(int threads) nogil
         void freeCore(VSCore *core) nogil
@@ -165,7 +171,7 @@ cdef extern from "include/VapourSynth.h" nogil:
 
         VSFormat *getFormatPreset(int id, VSCore *core) nogil
         VSFormat *registerFormat(int colorFamily, int sampleType, int bitsPerSample, int subSamplingW, int subSamplingH, VSCore *core) nogil
- 
+
         void getFrameAsync(int n, VSNodeRef *node, VSFrameDoneCallback callback, void *userData) nogil
         const VSFrameRef *getFrame(int n, VSNodeRef *node, char *errorMsg, int bufSize) nogil
         void requestFrameFilter(int n, VSNodeRef *node, VSFrameContext *frameCtx) nogil
@@ -212,8 +218,8 @@ cdef extern from "include/VapourSynth.h" nogil:
         bint propSetNode(VSMap *map, const char *key, VSNodeRef *node, int append) nogil
         bint propSetFrame(VSMap *map, const char *key, const VSFrameRef *f, int append) nogil
 
-        VSPlugin *getPluginId(const char *identifier, VSCore *core) nogil
-        VSPlugin *getPluginNs(const char *ns, VSCore *core) nogil
+        VSPlugin *getPluginById(const char *identifier, VSCore *core) nogil
+        VSPlugin *getPluginByNs(const char *ns, VSCore *core) nogil
         VSMap *getPlugins(VSCore *core) nogil
         VSMap *getFunctions(VSPlugin *plugin) nogil
 
@@ -225,6 +231,6 @@ cdef extern from "include/VapourSynth.h" nogil:
         void freeFunc(VSFuncRef *f) nogil
 
         int64_t setMaxCacheSize(int64_t bytes, VSCore *core) nogil
-        
-        void setMessageHandler(VSMessageHandler handler) nogil
-    VSAPI *getVapourSynthAPI(int version) nogil
+
+        void setMessageHandler(VSMessageHandler handler, void *userData) nogil
+    const VSAPI *getVapourSynthAPI(int version) nogil

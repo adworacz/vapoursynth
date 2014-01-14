@@ -18,11 +18,9 @@
 * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 */
 
-#include <QtCore/QtCore>
-#include <cstdlib>
 #include <vector>
 #include <string>
-#include <cstddef>
+#include <algorithm>
 #include <stdexcept>
 #include "VapourSynth.h"
 #include "VSHelper.h"
@@ -100,9 +98,11 @@ typedef struct {
 #else
     std::vector<float> stack;
 #endif
-} JitExprData;
+} ExprData;
 
+#ifdef VS_TARGET_CPU_X86
 extern "C" void vs_evaluate_expr_sse2(const void *exprs, const uint8_t **rwptrs, const intptr_t *ptroffsets, int numiterations, void *stack);
+#endif
 
 #if VS_FEATURE_CUDA
 extern void VS_CC exprProcessCUDA(const VSFrameRef **src, VSFrameRef *dst, const JitExprData *d,
@@ -112,12 +112,12 @@ extern void VS_CC freeExprOps(ExprOp *gpu_ops);
 #endif
 
 static void VS_CC exprInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
-    JitExprData *d = (JitExprData *) * instanceData;
+    ExprData *d = (ExprData *) * instanceData;
     vsapi->setVideoInfo(&d->vi, 1, node);
 }
 
 static const VSFrameRef *VS_CC exprGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
-    JitExprData *d = (JitExprData *) * instanceData;
+    ExprData *d = (ExprData *) * instanceData;
 
     if (activationReason == arInitial) {
         for (int i = 0; i < 3; i++)
@@ -182,6 +182,7 @@ static const VSFrameRef *VS_CC exprGetFrame(int n, int activationReason, void **
                     }
                 }
             }
+        }
 
 #else
 
@@ -330,7 +331,6 @@ static const VSFrameRef *VS_CC exprGetFrame(int n, int activationReason, void **
                                 case opStoreF:
                                     ((float *)dstp)[x] = stacktop;
                                     goto loopend;
-                                }
                             }
                             loopend:;
                         }
@@ -353,12 +353,14 @@ static const VSFrameRef *VS_CC exprGetFrame(int n, int activationReason, void **
 }
 
 static void VS_CC exprFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
-    JitExprData *d = (JitExprData *)instanceData;
+    ExprData *d = (ExprData *)instanceData;
+
 #if VS_FEATURE_CUDA
     for (int i = 0; i < d->vi.format->numPlanes; i++) {
         freeExprOps(&d->gpu_ops[i][0]);
     }
 #endif
+
     for (int i = 0; i < 3; i++)
         vsapi->freeNode(d->node[i]);
     delete d;
@@ -457,16 +459,23 @@ static int parseExpression(const std::string &expr, std::vector<ExprOp> &ops, co
         else if (tokens[i] == "z")
             LOAD_OP(loadOp[2], 2);
         else {
-            bool ok;
-            LOAD_OP(opLoadConst, QString::fromUtf8(tokens[i].c_str()).toFloat(&ok));
-            if (!ok)
+            size_t pos = 0;
+            try {
+            LOAD_OP(opLoadConst, std::stof(tokens[i], &pos));
+            } catch (std::invalid_argument &) {
                 throw std::runtime_error("Failed to convert '" + tokens[i] + "' to float");
+            } catch (std::out_of_range &) {
+                throw std::runtime_error("Failed to convert '" + tokens[i] + "' to float");
+            }
+            if (pos != tokens[i].length())
+                throw std::runtime_error("Failed to convert '" + tokens[i] + "' to float");
+                
         }
     }
 
     if (tokens.size() > 0) {
         if (stackSize != 1)
-            throw std::runtime_error("Stack unbalanced at end of expression. Need to have exactly one value on the stack.");
+            throw std::runtime_error("Stack unbalanced at end of expression. Need to have exactly one value on the stack to return.");
         ops.push_back(storeOp);
     }
 
@@ -474,8 +483,8 @@ static int parseExpression(const std::string &expr, std::vector<ExprOp> &ops, co
 }
 
 static void VS_CC exprCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
-    JitExprData d;
-    JitExprData *data;
+    ExprData d;
+    ExprData *data;
     int err;
 
     try {
@@ -501,7 +510,7 @@ static void VS_CC exprCreate(const VSMap *in, VSMap *out, void *userData, VSCore
                     || vi[0]->height != vi[i]->height)
                     throw std::runtime_error("All inputs must have the same number of planes and the same dimensions, subsampling included");
                 if ((vi[i]->format->bitsPerSample > 16 && vi[i]->format->sampleType == stInteger)
-                    || vi[i]->format->bitsPerSample != 32 && vi[i]->format->sampleType == stFloat)
+                    || (vi[i]->format->bitsPerSample != 32 && vi[i]->format->sampleType == stFloat))
                     throw std::runtime_error("Input clips must be 8-16 bit integer or 32 bit float format");
             }
         }
@@ -567,7 +576,7 @@ static void VS_CC exprCreate(const VSMap *in, VSMap *out, void *userData, VSCore
         return;
     }
 
-    data = new JitExprData();
+    data = new ExprData();
     *data = d;
 
     vsapi->createFilter(in, out, "Expr", exprInit, exprGetFrame, exprFree, fmParallelRequests, 0, data, core);

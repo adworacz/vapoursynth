@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2012 Fredrik Mellbin
+* Copyright (c) 2012-2013 Fredrik Mellbin
 *
 * This file is part of VapourSynth.
 *
@@ -21,8 +21,9 @@
 #ifndef CACHEFILTER_H
 #define CACHEFILTER_H
 
-#include <QtCore/qhash.h>
 #include "vscore.h"
+#include <unordered_map>
+#include <assert.h>
 
 class VSCache {
 private:
@@ -40,7 +41,9 @@ private:
     Node *weakpoint;
     Node *last;
 
-    QHash<int, Node> hash;
+    std::unordered_map<int, Node> hash;
+
+    bool fixedSize;
 
     int maxSize;
     int currentSize;
@@ -72,25 +75,26 @@ private:
         else
             historySize--;
 
-        hash.remove(n.key);
+        hash.erase(n.key);
     }
 
     inline PVideoFrame relink(const int key) {
-        QHash<int, Node>::iterator i = hash.find(key);
+        auto i = hash.find(key);
 
-        if (QHash<int, Node>::const_iterator(i) == hash.constEnd()) {
+        if (i == hash.end()) {
             farMiss++;
             return PVideoFrame();
         }
 
-        Node &n = *i;
+        Node &n = i->second;
 
         if (!n.frame) {
             nearMiss++;
-            n.frame = n.weakFrame;
-
-            if (!n.frame)
+            try {
+                n.frame = PVideoFrame(n.weakFrame);
+            } catch (std::bad_weak_ptr &) {
                 return PVideoFrame();
+            }                
 
             currentSize++;
             historySize--;
@@ -121,19 +125,17 @@ private:
         if (!weakpoint) {
             if (currentSize > maxSize) {
                 weakpoint = last;
-                weakpoint->frame.clear();
+                weakpoint->frame.reset();
             }
         } else if (&n == origWeakPoint || historySize > maxHistorySize) {
             weakpoint = weakpoint->prevNode;
-            weakpoint->frame.clear();
+            weakpoint->frame.reset();
         }
 
-        Q_ASSERT(historySize <= maxHistorySize);
+        assert(historySize <= maxHistorySize);
 
         return n.frame;
     }
-
-    Q_DISABLE_COPY(VSCache)
 
 public:
     enum CacheAction {
@@ -143,49 +145,80 @@ public:
         caClear
     };
 
-    VSCache(int maxSize, int maxHistorySize);
+    VSCache(int maxSize, int maxHistorySize, bool fixedSize);
     ~VSCache() {
         clear();
     }
 
-    int getMaxFrames() const {
+    inline int getMaxFrames() const {
         return maxSize;
     }
-    void setMaxFrames(int m) {
+    inline void setMaxFrames(int m) {
         maxSize = m;
         trim(maxSize, maxHistorySize);
     }
-    int getMaxHistory() const {
+    inline int getMaxHistory() const {
         return maxHistorySize;
     }
-    void setMaxHistory(int m) {
+    inline void setMaxHistory(int m) {
         maxHistorySize = m;
         trim(maxSize, maxHistorySize);
     }
 
-    inline int size() const {
+    inline size_t size() const {
         return hash.size();
     }
-    inline QList<int> keys() const {
-        return hash.keys();
+
+    inline void clear() {
+        hash.clear();
+        first = NULL;
+        last = NULL;
+        weakpoint = NULL;
+        currentSize = 0;
+        historySize = 0;
+        clearStats();
     }
 
-    inline void clear();
-    inline void clearStats();
+    inline void clearStats() {
+        hits = 0;
+        nearMiss = 0;
+        farMiss = 0;
+    }
 
     bool insert(const int key, const PVideoFrame &object);
-    PVideoFrame object(const int key) const;
+    PVideoFrame object(const int key);
     inline bool contains(const int key) const {
-        return hash.contains(key);
+        return hash.count(key) > 0;
     }
-    PVideoFrame operator[](const int key) const;
+    PVideoFrame operator[](const int key);
 
     bool remove(const int key);
 
+
+
     CacheAction recommendSize();
+
+    void adjustSize(bool needMemory);
 private:
     void trim(int max, int maxHistory);
 
+};
+
+class CacheInstance {
+public:
+    VSCache cache;
+    VSNodeRef *clip;
+    VSNode *node;
+    VSCore *core;
+    CacheInstance(VSNodeRef *clip, VSNode *node, VSCore *core, bool fixedSize) : cache(20, 20, fixedSize), clip(clip), node(node), core(core) { }
+    void addCache() {
+        std::lock_guard<std::mutex> lock(core->cacheLock); 
+        core->caches.insert(node);
+    }
+    void removeCache() {
+        std::lock_guard<std::mutex> lock(core->cacheLock);
+        core->caches.erase(node);
+    }
 };
 
 void VS_CC cacheInitialize(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin);

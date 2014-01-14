@@ -10,7 +10,7 @@ Contents:
 
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 3
 
    installation
    gettingstarted
@@ -19,10 +19,10 @@ Contents:
    vsfs
    pluginlist
    apireference
-
-   about
    avisynthcomp
+   includedplugins
    functions
+   about
 
 
 Indices and tables

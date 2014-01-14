@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2012 Fredrik Mellbin
+* Copyright (c) 2012-2013 Fredrik Mellbin
 *
 * This file is part of VapourSynth.
 *
@@ -20,53 +20,71 @@
 
 #include "vscore.h"
 #include "cpufeatures.h"
+#include "vslog.h"
+#include <assert.h>
+#include <string.h>
+#include <string>
 
 void VS_CC configPlugin(const char *identifier, const char *defaultNamespace, const char *name, int apiVersion, int readOnly, VSPlugin *plugin) {
-    plugin->configPlugin(identifier, defaultNamespace, name, apiVersion, readOnly);
+    assert(identifier && defaultNamespace && name && plugin);
+    plugin->configPlugin(identifier, defaultNamespace, name, apiVersion, !!readOnly);
 }
 
 void VS_CC registerFunction(const char *name, const char *args, VSPublicFunction argsFunc, void *functionData, VSPlugin *plugin) {
+    assert(name && args && argsFunc && plugin);
     plugin->registerFunction(name, args, argsFunc, functionData);
 }
 
 static const VSFormat *VS_CC getFormatPreset(int id, VSCore *core) {
+    assert(core);
     return core->getFormatPreset((VSPresetFormat)id);
 }
 
 static const VSFormat *VS_CC registerFormat(int colorFamily, int sampleType, int bitsPerSample, int subSamplingW, int subSamplingH, VSCore *core) {
+    assert(core);
     return core->registerFormat((VSColorFamily)colorFamily, (VSSampleType)sampleType, bitsPerSample, subSamplingW, subSamplingH);
 }
 
 static const VSFrameRef *VS_CC cloneFrameRef(const VSFrameRef *frame) {
-    Q_ASSERT(frame);
+    assert(frame);
     return new VSFrameRef(frame->frame);
 }
 
 static VSNodeRef *VS_CC cloneNodeRef(VSNodeRef *node) {
-    Q_ASSERT(node);
+    assert(node);
     return new VSNodeRef(node->clip, node->index);
 }
 
 static int VS_CC getStride(const VSFrameRef *frame, int plane) {
+    assert(frame);
     return frame->frame->getStride(plane);
 }
 
 static const uint8_t *VS_CC getReadPtr(const VSFrameRef *frame, int plane) {
+    assert(frame);
     return frame->frame->getReadPtr(plane);
 }
 
 static uint8_t *VS_CC getWritePtr(VSFrameRef *frame, int plane) {
+    assert(frame);
     return frame->frame->getWritePtr(plane);
 }
 
 static void VS_CC getFrameAsync(int n, VSNodeRef *clip, VSFrameDoneCallback fdc, void *userData) {
-    PFrameContext c(new FrameContext(n, clip->index, clip, fdc, userData));
-    clip->clip->getFrame(c);
+    assert(clip && fdc);
+    int numFrames = clip->clip->getVideoInfo(clip->index).numFrames;
+    if (n < 0 || (numFrames && n >= numFrames)) {
+        PFrameContext ctx(std::make_shared<FrameContext>(n, clip->index, clip, fdc, userData));
+        ctx->setError("Invalid frame number requested, clip only has " + std::to_string(numFrames) + " frames");
+        clip->clip->getFrame(ctx);
+    } else {
+        clip->clip->getFrame(std::make_shared<FrameContext>(n, clip->index, clip, fdc, userData));
+    }
 }
 
 struct GetFrameWaiter {
-    QMutex b;
-    QWaitCondition a;
+    std::mutex b;
+    std::condition_variable a;
     const VSFrameRef *r;
     char *errorMsg;
     int bufSize;
@@ -75,45 +93,51 @@ struct GetFrameWaiter {
 
 static void VS_CC frameWaiterCallback(void *userData, const VSFrameRef *frame, int n, VSNodeRef *node, const char *errorMsg) {
     GetFrameWaiter *g = (GetFrameWaiter *)userData;
-    QMutexLocker l(&g->b);
+    std::lock_guard<std::mutex> l(g->b);
     g->r = frame;
-    memset(g->errorMsg, 0, g->bufSize);
-    if (errorMsg) {
-        strncpy(g->errorMsg, errorMsg, g->bufSize);
-		g->errorMsg[g->bufSize - 1] = 0;
-	}
-    g->a.wakeOne();
+    if (g->errorMsg && g->bufSize > 0) {
+        memset(g->errorMsg, 0, g->bufSize);
+        if (errorMsg) {
+            strncpy(g->errorMsg, errorMsg, g->bufSize);
+            g->errorMsg[g->bufSize - 1] = 0;
+        }
+    }
+    g->a.notify_one();
 }
 
 static const VSFrameRef *VS_CC getFrame(int n, VSNodeRef *clip, char *errorMsg, int bufSize) {
+    assert(clip);
     GetFrameWaiter g(errorMsg, bufSize);
-    QMutexLocker l(&g.b);
-	PFrameContext c(new FrameContext(n, clip->index, clip, &frameWaiterCallback, &g));
-	VSNode *node = clip->clip.data();
-	bool isWorker = node->isWorkerThread();
-	if (isWorker)
-		node->releaseThread();
-    node->getFrame(c);
-    g.a.wait(&g.b);
-	if (isWorker)
-		node->reserveThread();
+    std::unique_lock<std::mutex> l(g.b);
+    VSNode *node = clip->clip.get();
+    bool isWorker = node->isWorkerThread();
+    if (isWorker)
+        node->releaseThread();
+    node->getFrame(std::make_shared<FrameContext>(n, clip->index, clip, &frameWaiterCallback, &g));
+    g.a.wait(l);
+    if (isWorker)
+        node->reserveThread();
     return g.r;
 }
 
-static void VS_CC requestFrameFilter(int n, VSNodeRef *clip, VSFrameContext *ctxHandle) {
-    PFrameContext f(*(PFrameContext *)ctxHandle);
-    PFrameContext g(new FrameContext(n, clip->index, clip->clip.data(), f));
-    clip->clip->getFrame(g);
+static void VS_CC requestFrameFilter(int n, VSNodeRef *clip, VSFrameContext *frameCtx) {
+    assert(clip && frameCtx);
+    int numFrames = clip->clip->getVideoInfo(clip->index).numFrames;
+    if (numFrames && n >= numFrames)
+        n = numFrames - 1;
+    frameCtx->reqList.push_back(std::make_shared<FrameContext>(n, clip->index, clip->clip.get(), frameCtx->ctx));
 }
 
-static const VSFrameRef *VS_CC getFrameFilter(int n, VSNodeRef *clip, VSFrameContext *ctxHandle) {
-    PFrameContext f(*(PFrameContext *)ctxHandle);
-    PVideoFrame g = f->availableFrames.value(NodeOutputKey(clip->clip.data(), n, clip->index));
-
-    if (g)
-        return new VSFrameRef(g);
-    else
-        return NULL;
+static const VSFrameRef *VS_CC getFrameFilter(int n, VSNodeRef *clip, VSFrameContext *frameCtx) {
+    assert(clip && frameCtx);
+    try {
+        int numFrames = clip->clip->getVideoInfo(clip->index).numFrames;
+        if (numFrames && n >= numFrames)
+            n = numFrames - 1;
+        return new VSFrameRef(frameCtx->ctx->availableFrames.at(NodeOutputKey(clip->clip.get(), n, clip->index)));
+    } catch (std::out_of_range &) {
+    }
+    return nullptr;
 }
 
 static void VS_CC freeFrame(const VSFrameRef *frame) {
@@ -125,8 +149,8 @@ static void VS_CC freeNode(VSNodeRef *clip) {
 }
 
 static VSFrameRef *VS_CC newVideoFrame(const VSFormat *format, int width, int height, const VSFrameRef *propSrc, VSCore *core) {
-    Q_ASSERT(format);
-    return new VSFrameRef(core->newVideoFrame(format, width, height, propSrc ? propSrc->frame.data() : NULL));
+    assert(format && core);
+    return new VSFrameRef(core->newVideoFrame(format, width, height, propSrc ? propSrc->frame.get() : NULL));
 }
 
 static FrameLocation VS_CC getFrameLocation(const VSFrameRef *f) {
@@ -134,111 +158,125 @@ static FrameLocation VS_CC getFrameLocation(const VSFrameRef *f) {
 }
 
 static VSFrameRef *VS_CC newVideoFrame2(const VSFormat *format, int width, int height, const VSFrameRef **planeSrc, const int *planes, const VSFrameRef *propSrc, VSCore *core) {
-    Q_ASSERT(format);
+    assert(format && core);
     VSFrame *fp[3];
     for (int i = 0; i < format->numPlanes; i++)
-        fp[i] = planeSrc[i] ? planeSrc[i]->frame.data() : NULL;
-    return new VSFrameRef(core->newVideoFrame(format, width, height, fp, planes, propSrc ? propSrc->frame.data() : NULL));
+        fp[i] = planeSrc[i] ? planeSrc[i]->frame.get() : NULL;
+    return new VSFrameRef(core->newVideoFrame(format, width, height, fp, planes, propSrc ? propSrc->frame.get() : NULL));
 }
 
 static VSFrameRef *VS_CC copyFrame(const VSFrameRef *frame, VSCore *core) {
+    assert(frame && core);
     return new VSFrameRef(core->copyFrame(frame->frame));
 }
 
 static void VS_CC copyFrameProps(const VSFrameRef *src, VSFrameRef *dst, VSCore *core) {
+    assert(src && dst && core);
     core->copyFrameProps(src->frame, dst->frame);
 }
 
 static void VS_CC createFilter(const VSMap *in, VSMap *out, const char *name, VSFilterInit init, VSFilterGetFrame getFrame, VSFilterFree free, int filterMode, int flags, void *instanceData, VSCore *core) {
+    assert(in && out && name && init && getFrame && core);
+    if (!name)
+        vsFatal("NULL name pointer passed to createFilter()");
     core->createFilter(in, out, name, init, getFrame, free, static_cast<VSFilterMode>(filterMode), flags, instanceData, VAPOURSYNTH_API_VERSION);
 }
 
 static void VS_CC setError(VSMap *map, const char *errorMessage) {
-    map->clear();
-    VSVariant l(VSVariant::vData);
-    l.s.append(errorMessage ? errorMessage : "Error: no error specified");
-    map->insert("_Error", l);
+    assert(map && errorMessage);
+    map->setError(errorMessage ? errorMessage : "Error: no error specified");
 }
 
 static const char *VS_CC getError(const VSMap *map) {
-    if (map->contains("_Error"))
-        return (*map)["_Error"].s[0].constData();
+    assert(map);
+    if (map->size() == 1 && map->contains("_Error") && (*map)["_Error"].size() > 0)
+        return (*map)["_Error"].getValue<VSMapData>(0)->c_str();
     else
         return NULL;
 }
 
 static void VS_CC setFilterError(const char *errorMessage, VSFrameContext *context) {
-    PFrameContext f(*(PFrameContext *)context);
-    f->setError(errorMessage);
+    assert(errorMessage && errorMessage);
+    context->ctx->setError(errorMessage);
 }
 
 //property access functions
 static const VSVideoInfo *VS_CC getVideoInfo(VSNodeRef *c) {
+    assert(c);
     return &c->clip->getVideoInfo(c->index);
 }
 
 static void VS_CC setVideoInfo(const VSVideoInfo *vi, int numOutputs, VSNode *c) {
+    assert(vi && numOutputs > 0 && c);
     c->setVideoInfo(vi, numOutputs);
 }
 
 static const VSFormat *VS_CC getFrameFormat(const VSFrameRef *f) {
+    assert(f);
     return f->frame->getFormat();
 }
 
 static int VS_CC getFrameWidth(const VSFrameRef *f, int plane) {
+    assert(f);
     return f->frame->getWidth(plane);
 }
 
 static int VS_CC getFrameHeight(const VSFrameRef *f, int plane) {
+    assert(f);
     return f->frame->getHeight(plane);
 }
 
 static const VSMap *VS_CC getFramePropsRO(const VSFrameRef *frame) {
+    assert(frame);
     return &frame->frame->getConstProperties();
 }
 
 static VSMap *VS_CC getFramePropsRW(VSFrameRef *frame) {
+    assert(frame);
     return &frame->frame->getProperties();
 }
 
 static int VS_CC propNumKeys(const VSMap *props) {
-    return props->keys().count();
+    assert(props);
+    return static_cast<int>(props->size());
 }
 
 static const char *VS_CC propGetKey(const VSMap *props, int index) {
-    if (index < 0 || index >= props->count())
-        qFatal("Out of bound index");
+    assert(props);
+    if (index < 0 || static_cast<size_t>(index) >= props->size())
+        vsFatal("Out of bound index");
 
-    return props->keys()[index].constData();
+    return props->key(index);
 }
 
 static int VS_CC propNumElements(const VSMap *props, const char *name) {
+    assert(props && name);
     if (!props->contains(name))
         return -1;
 
-    const VSVariant &val = (*props)[name];
-    return val.count();
+    return (*props)[name].size();
 }
 
 static char VS_CC propGetType(const VSMap *props, const char *name) {
+    assert(props && name);
     if (!props->contains(name))
         return 'u';
 
     const char a[] = { 'u', 'i', 'f', 's', 'c', 'v', 'm'};
-    const VSVariant &val = (*props)[name];
-    return a[val.vtype];
+    return a[(*props)[name].getType()];
 }
 
 static int getPropErrorCheck(const VSMap *props, const char *name, int index, int *error, int type) {
+    assert(props && name);
     int err = 0;
 
     if (getError(props))
-        qFatal("Attempted to read from a map with error set: %s", getError(props));
+        vsFatal("Attempted to read from a map with error set: %s", getError(props));
 
     if (!props->contains(name))
         err |= peUnset;
 
-    if (!err && props->value(name).vtype != type)
+    if (!err && (*props)[name].getType() != type)
         err |= peType;
 
     int c = propNumElements(props, name);
@@ -247,7 +285,7 @@ static int getPropErrorCheck(const VSMap *props, const char *name, int index, in
         err |= peIndex;
 
     if (err && !error)
-        qFatal("Property read unsuccessful but no error output: %s", name);
+        vsFatal("Property read unsuccessful but no error output: %s", name);
 
     if (error)
         *error = err;
@@ -261,8 +299,7 @@ static int64_t VS_CC propGetInt(const VSMap *props, const char *name, int index,
     if (err)
         return 0;
 
-    const VSVariant &l = (*props)[name];
-    return l.i[index];
+    return (*props)[name].getValue<int64_t>(index);
 }
 
 static double VS_CC propGetFloat(const VSMap *props, const char *name, int index, int *error) {
@@ -271,8 +308,7 @@ static double VS_CC propGetFloat(const VSMap *props, const char *name, int index
     if (err)
         return 0;
 
-    const VSVariant &l = (*props)[name];
-    return l.f[index];
+    return (*props)[name].getValue<double>(index);
 }
 
 static const char *VS_CC propGetData(const VSMap *props, const char *name, int index, int *error) {
@@ -281,8 +317,7 @@ static const char *VS_CC propGetData(const VSMap *props, const char *name, int i
     if (err)
         return 0;
 
-    const VSVariant &l = (*props)[name];
-    return l.s[index].constData();
+    return (*props)[name].getValue<VSMapData>(index)->c_str();
 }
 
 static int VS_CC propGetDataSize(const VSMap *props, const char *name, int index, int *error) {
@@ -291,8 +326,7 @@ static int VS_CC propGetDataSize(const VSMap *props, const char *name, int index
     if (err)
         return 0;
 
-    const VSVariant &l = (*props)[name];
-    return l.s[index].size();
+    return static_cast<int>((*props)[name].getValue<VSMapData>(index)->size());
 }
 
 static VSNodeRef *VS_CC propGetNode(const VSMap *props, const char *name, int index, int *error) {
@@ -301,8 +335,7 @@ static VSNodeRef *VS_CC propGetNode(const VSMap *props, const char *name, int in
     if (err)
         return 0;
 
-    const VSVariant &l = (*props)[name];
-    return new VSNodeRef(l.c[index]);
+    return new VSNodeRef((*props)[name].getValue<VSNodeRef>(index));
 }
 
 static const VSFrameRef *VS_CC propGetFrame(const VSMap *props, const char *name, int index, int *error) {
@@ -311,20 +344,21 @@ static const VSFrameRef *VS_CC propGetFrame(const VSMap *props, const char *name
     if (err)
         return 0;
 
-    const VSVariant &l = (*props)[name];
-    return new VSFrameRef(l.v[index]);
+    return new VSFrameRef((*props)[name].getValue<PVideoFrame>(index));
 }
 
 static int VS_CC propDeleteKey(VSMap *props, const char *name) {
-    return props->remove(name);
+    assert(props && name);
+    return props->erase(name);
 }
 
 static void sharedPropSet(VSMap *props, const char *name, int &append) {
+    assert(props && name);
     if (append != paReplace && append != paAppend && append != paTouch)
-        qFatal("Invalid prop append mode given");
+        vsFatal("Invalid prop append mode given");
 
     if (append == paReplace) {
-        props->remove(name);
+        props->erase(name);
         append = paAppend;
     }
 }
@@ -334,14 +368,14 @@ static int VS_CC propSetInt(VSMap *props, const char *name, int64_t i, int appen
     if (props->contains(name)) {
         VSVariant &l = (*props)[name];
 
-        if (l.vtype != VSVariant::vInt)
+        if (l.getType() != VSVariant::vInt)
             return 1;
         else if (append == paAppend)
-            l.i.append(i);
+            l.append(i);
     } else {
         VSVariant l(VSVariant::vInt);
         if (append == paAppend)
-            l.i.append(i);
+            l.append(i);
         props->insert(name, l);
     }
 
@@ -353,14 +387,14 @@ static int VS_CC propSetFloat(VSMap *props, const char *name, double d, int appe
     if (props->contains(name)) {
         VSVariant &l = (*props)[name];
 
-        if (l.vtype != VSVariant::vFloat)
+        if (l.getType() != VSVariant::vFloat)
             return 1;
         else if (append == paAppend)
-            l.f.append(d);
+            l.append(d);
     } else {
         VSVariant l(VSVariant::vFloat);
         if (append == paAppend)
-            l.f.append(d);
+            l.append(d);
         props->insert(name, l);
     }
 
@@ -372,14 +406,14 @@ static int VS_CC propSetData(VSMap *props, const char *name, const char *d, int 
     if (props->contains(name)) {
         VSVariant &l = (*props)[name];
 
-        if (l.vtype != VSVariant::vData)
+        if (l.getType() != VSVariant::vData)
             return 1;
         else if (append == paAppend)
-            l.s.append(d);
+            l.append(d);
     } else {
         VSVariant l(VSVariant::vData);
         if (append == paAppend)
-            l.s.append(length >= 0 ? QByteArray(d, length) : QByteArray(d));
+            l.append(length >= 0 ? std::string(d, length) : std::string(d));
         props->insert(name, l);
     }
 
@@ -391,14 +425,14 @@ static int VS_CC propSetNode(VSMap *props, const char *name, VSNodeRef *clip, in
     if (props->contains(name)) {
         VSVariant &l = (*props)[name];
 
-        if (l.vtype != VSVariant::vNode)
+        if (l.getType() != VSVariant::vNode)
             return 1;
         else if (append == paAppend)
-            l.c.append(*clip);
+            l.append(*clip);
     } else {
         VSVariant l(VSVariant::vNode);
         if (append == paAppend)
-            l.c.append(*clip);
+            l.append(*clip);
         props->insert(name, l);
     }
 
@@ -410,14 +444,14 @@ static int VS_CC propSetFrame(VSMap *props, const char *name, const VSFrameRef *
     if (props->contains(name)) {
         VSVariant &l = (*props)[name];
 
-        if (l.vtype != VSVariant::vFrame)
+        if (l.getType() != VSVariant::vFrame)
             return 1;
         else if (append == paAppend)
-            l.v.append(frame->frame);
+            l.append(frame->frame);
     } else {
         VSVariant l(VSVariant::vFrame);
         if (append == paAppend)
-            l.v.append(frame->frame);
+            l.append(frame->frame);
         props->insert(name, l);
     }
 
@@ -425,11 +459,11 @@ static int VS_CC propSetFrame(VSMap *props, const char *name, const VSFrameRef *
 }
 
 static VSMap *VS_CC invoke(VSPlugin *plugin, const char *name, const VSMap *args) {
-    Q_ASSERT(plugin);
+    assert(plugin && name && args);
     return new VSMap(plugin->invoke(name, *args));
 }
 
-static VSMap *VS_CC newMap() {
+static VSMap *VS_CC createMap() {
     return new VSMap();
 }
 
@@ -438,6 +472,7 @@ static void VS_CC freeMap(VSMap *map) {
 }
 
 static void VS_CC clearMap(VSMap *map) {
+    assert(map);
     map->clear();
 }
 
@@ -449,23 +484,28 @@ static void VS_CC freeCore(VSCore *core) {
     delete core;
 }
 
-static VSPlugin *VS_CC getPluginId(const char *identifier, VSCore *core) {
-    return core->getPluginId(identifier);
+static VSPlugin *VS_CC getPluginById(const char *identifier, VSCore *core) {
+    assert(identifier && core);
+    return core->getPluginById(identifier);
 }
 
-static VSPlugin *VS_CC getPluginNs(const char *ns, VSCore *core) {
-    return core->getPluginNs(ns);
+static VSPlugin *VS_CC getPluginByNs(const char *ns, VSCore *core) {
+    assert(ns && core);
+    return core->getPluginByNs(ns);
 }
 
 static VSMap *VS_CC getPlugins(VSCore *core) {
+    assert(core);
     return new VSMap(core->getPlugins());
 }
 
 static VSMap *VS_CC getFunctions(VSPlugin *plugin) {
+    assert(plugin);
     return new VSMap(plugin->getFunctions());
 }
 
 static const VSCoreInfo *VS_CC getCoreInfo(VSCore *core) {
+    assert(core);
     return &core->getCoreInfo();
 }
 
@@ -475,24 +515,25 @@ static VSFuncRef *VS_CC propGetFunc(const VSMap *props, const char *name, int in
     if (err)
         return 0;
 
-    const VSVariant &l = (*props)[name];
-    return new VSFuncRef(l.m[index]);
+    return new VSFuncRef((*props)[name].getValue<PExtFunction>(index));
 }
 
 static int VS_CC propSetFunc(VSMap *props, const char *name, VSFuncRef *func, int append) {
+    assert(props && name && func);
+
     if (!append)
-        props->remove(name);
+        props->erase(name);
 
     if (props->contains(name)) {
         VSVariant &l = (*props)[name];
 
-        if (l.vtype != VSVariant::vMethod)
+        if (l.getType() != VSVariant::vMethod)
             return 1;
         else
-            l.m.append(func->func);
+            l.append(func->func);
     } else {
         VSVariant l(VSVariant::vMethod);
-        l.m.append(func->func);
+        l.append(func->func);
         props->insert(name, l);
     }
 
@@ -500,11 +541,13 @@ static int VS_CC propSetFunc(VSMap *props, const char *name, VSFuncRef *func, in
 }
 
 static void VS_CC callFunc(VSFuncRef *func, const VSMap *in, VSMap *out, VSCore *core, const VSAPI *vsapi) {
+    assert(func && in && out && core && vsapi);
     func->func->call(in, out, core, vsapi);
 }
 
 static VSFuncRef *VS_CC createFunc(VSPublicFunction func, void *userData, VSFreeFuncData free) {
-    return new VSFuncRef(PExtFunction(new ExtFunction(func, userData, free)));
+    assert(func);
+    return new VSFuncRef(std::make_shared<ExtFunction>(func, userData, free));
 }
 
 static void VS_CC freeFunc(VSFuncRef *f) {
@@ -512,45 +555,33 @@ static void VS_CC freeFunc(VSFuncRef *f) {
 }
 
 static void VS_CC queryCompletedFrame(VSNodeRef **node, int *n, VSFrameContext *frameCtx) {
-    PFrameContext f(*(PFrameContext *)frameCtx);
-    *node = f->lastCompletedNode;
-    *n = f->lastCompletedN;
+    assert(node && n && frameCtx);
+    *node = frameCtx->ctx->lastCompletedNode;
+    *n = frameCtx->ctx->lastCompletedN;
 }
 
 static void VS_CC releaseFrameEarly(VSNodeRef *node, int n, VSFrameContext *frameCtx) {
-    PFrameContext f(*(PFrameContext *)frameCtx);
-    f->availableFrames.remove(NodeOutputKey(node->clip.data(), n, node->index));
+    assert(node && frameCtx);
+    frameCtx->ctx->availableFrames.erase(NodeOutputKey(node->clip.get(), n, node->index));
 }
 
 static VSFuncRef *VS_CC cloneFuncRef(VSFuncRef *f) {
+    assert(f);
     return new VSFuncRef(f->func);
 }
 
 static int64_t VS_CC setMaxCacheSize(int64_t bytes, VSCore *core) {
+    assert(core);
     return core->setMaxCacheSize(bytes);
 }
 
 static int VS_CC getOutputIndex(VSFrameContext *frameCtx) {
-    PFrameContext f(*(PFrameContext *)frameCtx);
-    return f->index;
+    assert(frameCtx);
+    return frameCtx->ctx->index;
 }
 
-static VSMessageHandler handler = NULL;
-
-void vsMessageHandler(QtMsgType type, const char *msg) {
-    handler(type, msg);
-    if (type == QtFatalMsg)
-        abort();
-}
-
-static void VS_CC setMessageHandler(VSMessageHandler handler) {
-    if (handler) {
-        ::handler = handler;
-        qInstallMsgHandler(vsMessageHandler);
-    } else {
-        qInstallMsgHandler(NULL);
-        ::handler = NULL;
-    }
+static void VS_CC setMessageHandler(VSMessageHandler handler, void *userData) {
+    vsSetMessageHandler(handler, userData);
 }
 
 #if VS_FEATURE_CUDA
@@ -593,8 +624,8 @@ const VSAPI vsapi = {
     &copyFrame,
     &copyFrameProps,
     &registerFunction,
-    &getPluginId,
-    &getPluginNs,
+    &getPluginById,
+    &getPluginByNs,
     &getPlugins,
     &getFunctions,
     &createFilter,
@@ -618,7 +649,7 @@ const VSAPI vsapi = {
     &createFunc,
     &callFunc,
 
-    &newMap,
+    &createMap,
     &freeMap,
     &clearMap,
 
@@ -665,110 +696,13 @@ const VSAPI vsapi = {
     &setMessageHandler
 };
 
-//////////////////////////
-// R2 compat junk
-
-typedef void (VS_CC *VSSetVideoInfo_R2)(const VSVideoInfo *vi, VSNode *node);
-typedef VSNodeRef *(VS_CC *VSCreateFilter_R2)(const VSMap *in, VSMap *out, const char *name, VSFilterInit init, VSFilterGetFrame getFrame, VSFilterFree free, int filterMode, int flags, void *instanceData, VSCore *core);
-
-static void VS_CC setVideoInfoR2(const VSVideoInfo *vi, VSNode *c) {
-    setVideoInfo(vi, 1, c);
-}
-
-static VSNodeRef *VS_CC createFilterR2(const VSMap *in, VSMap *out, const char *name, VSFilterInit init, VSFilterGetFrame getFrame, VSFilterFree free, int filterMode, int flags, void *instanceData, VSCore *core) {
-    core->createFilter(in, out, name, init, getFrame, free, static_cast<VSFilterMode>(filterMode), flags, instanceData, 2);
-    return propGetNode(out, "clip", 0, NULL);
-}
-
-struct VSAPI_R2 {
-    VSCreateCore createCore;
-    VSFreeCore freeCore;
-    VSGetCoreInfo getCoreInfo;
-
-    VSCloneFrameRef cloneFrameRef;
-    VSCloneNodeRef cloneNodeRef;
-    VSCloneFuncRef cloneFuncRef;
-
-    VSFreeFrame freeFrame;
-    VSFreeNode freeNode;
-    VSFreeFunc freeFunc;
-
-    VSNewVideoFrame newVideoFrame;
-    VSCopyFrame copyFrame;
-    VSCopyFrameProps copyFrameProps;
-
-    VSRegisterFunction registerFunction;
-    VSGetPluginId getPluginId;
-    VSGetPluginNs getPluginNs;
-    VSGetPlugins getPlugins;
-    VSGetFunctions getFunctions;
-    VSCreateFilter_R2 createFilter;
-    VSSetError setError;
-    VSGetError getError;
-    VSSetFilterError setFilterError;
-    VSInvoke invoke;
-
-    VSGetFormatPreset getFormatPreset;
-    VSRegisterFormat registerFormat;
-
-    VSGetFrame getFrame;
-    VSGetFrameAsync getFrameAsync;
-    VSGetFrameFilter getFrameFilter;
-    VSRequestFrameFilter requestFrameFilter;
-    VSQueryCompletedFrame queryCompletedFrame;
-    VSReleaseFrameEarly releaseFrameEarly;
-
-    VSGetStride getStride;
-    VSGetReadPtr getReadPtr;
-    VSGetWritePtr getWritePtr;
-
-    VSCreateFunc createFunc;
-    VSCallFunc callFunc;
-
-    //property access functions
-    VSCreateMap createMap;
-    VSFreeMap freeMap;
-    VSClearMap clearMap;
-
-    VSGetVideoInfo getVideoInfo;
-    VSSetVideoInfo_R2 setVideoInfo;
-    VSGetFrameFormat getFrameFormat;
-    VSGetFrameWidth getFrameWidth;
-    VSGetFrameHeight getFrameHeight;
-    VSGetFramePropsRO getFramePropsRO;
-    VSGetFramePropsRW getFramePropsRW;
-
-    VSPropNumKeys propNumKeys;
-    VSPropGetKey propGetKey;
-    VSPropNumElements propNumElements;
-    VSPropGetType propGetType;
-    VSPropGetInt propGetInt;
-    VSPropGetFloat propGetFloat;
-    VSPropGetData propGetData;
-    VSPropGetDataSize propGetDataSize;
-    VSPropGetNode propGetNode;
-    VSPropGetFrame propGetFrame;
-    VSPropGetFunc propGetFunc;
-
-    VSPropDeleteKey propDeleteKey;
-    VSPropSetInt propSetInt;
-    VSPropSetFloat propSetFloat;
-    VSPropSetData propSetData;
-    VSPropSetNode propSetNode;
-    VSPropSetFrame propSetFrame;
-    VSPropSetFunc propSetFunc;
-
-    VSSetMaxCacheSize setMaxCacheSize;
-    VSGetOutputIndex getOutputIndex;
-};
-
 ///////////////////////////////
 
 const VSAPI *getVSAPIInternal(int version) {
     if (version == VAPOURSYNTH_API_VERSION) {
         return &vsapi;
     } else {
-        qFatal("Internally requested API version %d", version);
+        vsFatal("Internally requested API version %d not supported", version);
         return NULL;
     }
 }
@@ -777,7 +711,7 @@ const VSAPI *VS_CC getVapourSynthAPI(int version) {
     CPUFeatures f;
     getCPUFeatures(&f);
     if (!f.can_run_vs) {
-        qWarning("System does not meet minimum requirements to run VapourSynth");
+        vsWarning("System does not meet minimum requirements to run VapourSynth");
         return NULL;
     } else if (version == VAPOURSYNTH_API_VERSION) {
         return &vsapi;

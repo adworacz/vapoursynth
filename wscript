@@ -2,7 +2,7 @@ import glob, os, subprocess, sys
 from waflib import Build, Task, TaskGen, Utils
 
 APPNAME = 'VapourSynth'
-VERSION = '19'
+VERSION = '22'
 
 TOP = os.curdir
 OUT = 'build'
@@ -72,7 +72,6 @@ def apply_rst(self):
 def options(opt):
     opt.load('compiler_c')
     opt.load('compiler_cxx')
-    opt.load('qt4')
 
     opt.add_option('--libdir', action = 'store', default = '${PREFIX}/lib', help = 'library installation directory')
     opt.add_option('--plugindir', action = 'store', default = '${LIBDIR}/vapoursynth', help = 'plugin installation directory')
@@ -207,7 +206,7 @@ def configure(conf):
                     ['-w',
                      '-Worphan-labels',
                      '-Wunrecognized-char',
-                     '-Dprogram_name=vs'])
+                     '-Dprivate_prefix=vs'])
     else:
         # For all non-x86 targets, use the GNU assembler.
         # Waf uses GCC instead of the assembler directly.
@@ -222,6 +221,10 @@ def configure(conf):
         add_options(['CFLAGS', 'CXXFLAGS'],
                     ['-DVS_CORE_EXPORTS',
                      '-fPIC'])
+        add_options(['CXXFLAGS'],
+                    ['-std=c++0x'])
+        add_options(['CFLAGS'],
+                    ['-std=c99'])
     elif conf.env.CXX_NAME == 'msvc':
         add_options(['CFLAGS', 'CXXFLAGS'],
                     ['/DVS_CORE_EXPORTS',
@@ -312,22 +315,9 @@ def configure(conf):
                          '-Wl,-z,noexecstack'])
 
     if conf.env.CORE == 'true':
-        conf.load('qt4')
-
-        conf.check_cxx(use = ['QTCORE'], header_name = 'QtCore/QtCore')
-        conf.check_cxx(use = ['QTCORE'], header_name = 'QtCore/QtCore', type_name = 'QAtomicInt')
-
-        conf.check_cc(lib = 'swscale')
-        conf.check_cc(use = ['SWSCALE'], header_name = 'libswscale/swscale.h')
-        conf.check_cc(use = ['SWSCALE'], header_name = 'libswscale/swscale.h', function_name = 'swscale_license')
-
-        conf.check_cc(lib = 'avutil')
-        conf.check_cc(use = ['AVUTIL'], header_name = 'libavutil/avutil.h')
-        conf.check_cc(use = ['AVUTIL'], header_name = 'libavutil/avutil.h', function_name = 'avutil_license')
-
-        conf.check_cc(lib = 'avcodec')
-        conf.check_cc(use = ['AVCODEC'], header_name = 'libavcodec/avcodec.h')
-        conf.check_cc(use = ['AVCODEC'], header_name = 'libavcodec/avcodec.h', function_name = 'avcodec_license')
+        conf.check_cfg(package = 'libswscale', args = '--libs --cflags', uselib_store = 'SWSCALE')
+        conf.check_cfg(package = 'libavutil', args = '--libs --cflags', uselib_store = 'AVUTIL')
+        conf.check_cfg(package = 'libavcodec', args = '--libs --cflags', uselib_store = 'AVCODEC')
 
     if conf.env.SCRIPT == 'true':
         conf.load('python')
@@ -335,18 +325,18 @@ def configure(conf):
         conf.check_python_version((3, 0, 0))
         conf.check_python_headers()
 
-    if 'true' in [conf.env.CORE, conf.env.SCRIPT]:
+    if 'true' in [conf.env.CORE, conf.env.SCRIPT] and not conf.env.DEST_OS in ['win32', 'cygwin', 'msys', 'uwin']:
+        conf.env.LIB_M = ['m']
         libs = '-lm '
 
         if not conf.env.DEST_OS in ['darwin', 'freebsd', 'netbsd', 'openbsd']:
+            conf.env.LIB_DL = ['dl']
             libs += '-ldl '
 
         conf.env.LIBS = libs.strip()
 
     if conf.env.FILTERS == 'true':
-        conf.check_cc(lib = 'ass', mandatory = False)
-        conf.check_cc(use = ['ASS'], header_name = 'ass/ass.h', mandatory = False)
-        conf.check_cc(use = ['ASS'], header_name = 'ass/ass.h', function_name = 'ass_library_init', mandatory = False)
+        conf.check_cfg(package = 'libass', args = '--libs --cflags', uselib_store = 'ASS')
 
     def convert_cuda_cxx_options():
         """ This function is necessary because CUDA's nvcc compiler does not
@@ -396,77 +386,101 @@ def build(bld):
 
         return srcpaths
 
+    uses = ['SWSCALE', 'AVUTIL', 'AVCODEC']
+    cuda_uses = ['CUDA', 'CUDART']
+
+    if not bld.env.DEST_OS in ['win32', 'cygwin', 'msys', 'uwin']:
+        uses += ['M']
+
+        if not bld.env.DEST_OS in ['darwin', 'freebsd', 'netbsd', 'openbsd']:
+            uses += ['DL']
+
     if bld.env.CORE == 'true':
         sources = search_paths([os.path.join('src', 'core'),
-                                os.path.join('src', 'core', 'asm')])
+                                os.path.join('src', 'core', 'asm'),
+                                os.path.join('src', 'core', 'asm', 'x86'),
+                                os.path.join('src', 'core', 'asm', 'arm'),
+                                os.path.join('src', 'core', 'asm', 'ppc')])
 
         if bld.env.DEST_OS in ['win32', 'cygwin', 'msys', 'uwin'] and bld.env.AVISYNTH == 'true':
             sources += search_paths([os.path.join('src', 'avisynth')])
 
-        bld(features = 'c qxx asm',
+        bld(features = 'c cxx asm',
             includes = 'include',
-            use = ['QTCORE', 'SWSCALE', 'AVUTIL', 'AVCODEC', 'CUDA', 'CUDART'],
+            use = uses.extend(cuda_uses),
             source = bld.path.ant_glob(sources),
             target = 'objs')
 
         if bld.env.SHARED == 'true':
-            bld(features = 'c qxx asm cxxshlib',
+            bld(features = 'c cxx asm cxxshlib',
                 use = ['objs'],
                 target = 'vapoursynth',
                 install_path = '${LIBDIR}')
 
         if bld.env.STATIC == 'true':
-            bld(features = 'c qxx asm cxxstlib',
-                use = ['objs', 'QTCORE', 'SWSCALE', 'AVUTIL', 'AVCODEC'],
+            bld(features = 'c cxx asm cxxstlib',
+                use = ['objs'] + uses,
                 target = 'vapoursynth',
                 install_path = '${LIBDIR}')
 
     if bld.env.SCRIPT == 'true':
         script_sources = search_paths([os.path.join('src', 'vsscript')])
 
-        bld(features = 'c qxx asm pyembed',
+        bld(features = 'c cxx asm pyembed',
             includes = 'include',
-            use = ['QTCORE', 'SWSCALE', 'AVUTIL', 'AVCODEC'],
+            use = uses,
             source = bld.path.ant_glob(script_sources),
             target = 'script_objs')
 
         if bld.env.SHARED == 'true':
-            bld(features = 'c qxx asm cxxshlib pyembed',
+            bld(features = 'c cxx asm cxxshlib pyembed',
                 use = ['script_objs'],
                 target = 'vapoursynth-script',
                 install_path = '${LIBDIR}')
 
         if bld.env.STATIC == 'true':
-            bld(features = 'c qxx asm cxxstlib pyembed',
-                use = ['script_objs', 'QTCORE', 'SWSCALE', 'AVUTIL', 'AVCODEC'],
+            bld(features = 'c cxx asm cxxstlib pyembed',
+                use = ['script_objs'] + uses,
                 target = 'vapoursynth-script',
                 install_path = '${LIBDIR}')
 
     if bld.env.PIPE == 'true':
         pipe_sources = search_paths([os.path.join('src', 'vspipe')])
 
-        bld(features = 'c qxx asm',
+        bld(features = 'c cxx asm',
             includes = 'include',
-            use = ['QTCORE', 'SWSCALE', 'AVUTIL', 'AVCODEC'],
+            use = uses,
             source = bld.path.ant_glob(pipe_sources),
             target = 'pipe_objs')
 
-        bld(features = 'c qxx asm cxxprogram',
+        bld(features = 'c cxx asm cxxprogram',
             includes = 'include',
-            use = ['pipe_objs', 'vapoursynth', 'vapoursynth-script', 'QTCORE', 'SWSCALE', 'AVUTIL', 'AVCODEC'],
+            use = ['pipe_objs', 'vapoursynth', 'vapoursynth-script'] + uses,
             target = 'vspipe')
 
     if bld.env.FILTERS == 'true':
-        bld(features = 'c qxx asm cxxshlib',
+        bld(features = 'c cxx asm cxxshlib',
             includes = 'include',
             source = bld.path.ant_glob(search_paths([os.path.join('src', 'filters', 'eedi3')])),
             target = 'eedi3',
             install_path = '${PLUGINDIR}')
 
-        bld(features = 'c qxx asm cxxshlib',
+        bld(features = 'c cxxshlib',
+            includes = 'include',
+            source = bld.path.ant_glob(search_paths([os.path.join('src', 'filters', 'vinverse')])),
+            target = 'vinverse',
+            install_path = '${PLUGINDIR}')
+
+        bld(features = 'c cxx asm cxxshlib',
             includes = 'include',
             source = bld.path.ant_glob(search_paths([os.path.join('src', 'filters', 'vivtc')])),
             target = 'vivtc',
+            install_path = '${PLUGINDIR}')
+
+        bld(features = 'c cxx asm cxxshlib',
+            includes = 'include',
+            source = bld.path.ant_glob(search_paths([os.path.join('src', 'filters', 'removegrain')])),
+            target = 'removegrain',
             install_path = '${PLUGINDIR}')
 
         if bld.env.LIB_ASS:

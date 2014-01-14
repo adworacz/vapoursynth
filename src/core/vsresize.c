@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2012 Fredrik Mellbin
+* Copyright (c) 2012-2013 Fredrik Mellbin
 *
 * This file is part of VapourSynth.
 *
@@ -27,8 +27,7 @@
 #include <libavcodec/avcodec.h>
 #include "vsresize.h"
 #include "VSHelper.h"
-
-#define RETERROR(x) do { vsapi->setError(out, (x)); return; } while (0)
+#include "filtershared.h"
 
 static enum PixelFormat formatIdToPixelFormat(int id) {
     switch (id) {
@@ -167,11 +166,16 @@ static const VSFrameRef *VS_CC resizeGetframe(int n, int activationReason, void 
         // swcale expect gbr plane order
         int switchsrc = 0;
         int switchdst = 0;
+        // flip output on compat rgb
+        int flip_src;
+        int flip_dst;
 
         if (!d->context || d->lsrcformat != fi || d->lsrcw != w || d->lsrch != h) {
             int srcid = formatIdToPixelFormat(fi->id);
 
             if (srcid == PIX_FMT_NONE) {
+                vsapi->freeFrame(src);
+                vsapi->freeFrame(dst);
                 vsapi->setFilterError("Resize: input format not supported", frameCtx);
                 return 0;
             }
@@ -185,6 +189,8 @@ static const VSFrameRef *VS_CC resizeGetframe(int n, int activationReason, void 
                              d->flags);
 
             if (!d->context) {
+                vsapi->freeFrame(src);
+                vsapi->freeFrame(dst);
                 vsapi->setFilterError("Resize: context creation failed", frameCtx);
                 return 0;
             }
@@ -196,15 +202,31 @@ static const VSFrameRef *VS_CC resizeGetframe(int n, int activationReason, void 
 
         switchsrc = fi->colorFamily == cmRGB;
         switchdst = d->vi.format->colorFamily == cmRGB;
-		
-        for (i = 0; i < vsapi->getFrameFormat(src)->numPlanes; i++) {
-            srcp[switchsrc ? rgb_map[i] : i] = (const uint8_t *)vsapi->getReadPtr(src, i);
-            src_stride[switchsrc ? rgb_map[i] : i] = vsapi->getStride(src, i);
-		}
+        flip_src = (fi->id == pfCompatBGR32);
+        flip_dst = (d->vi.format->id == pfCompatBGR32);
 
-        for (i = 0; i < d->vi.format->numPlanes; i++) {
-            dstp[switchdst ? rgb_map[i] : i] = (uint8_t *)vsapi->getWritePtr(dst, i);
-            dst_stride[switchdst ? rgb_map[i] : i] = vsapi->getStride(dst, i);
+        if (flip_src) {
+            for (i = 0; i < vsapi->getFrameFormat(src)->numPlanes; i++) {
+                srcp[switchsrc ? rgb_map[i] : i] = vsapi->getReadPtr(src, i) + (vsapi->getFrameHeight(src, i) - 1)*vsapi->getStride(src, i);
+                src_stride[switchsrc ? rgb_map[i] : i] = -vsapi->getStride(src, i);
+            }
+        } else {
+            for (i = 0; i < vsapi->getFrameFormat(src)->numPlanes; i++) {
+                srcp[switchsrc ? rgb_map[i] : i] = vsapi->getReadPtr(src, i);
+                src_stride[switchsrc ? rgb_map[i] : i] = vsapi->getStride(src, i);
+            }
+        }
+
+        if (flip_dst) {
+            for (i = 0; i < d->vi.format->numPlanes; i++) {
+                dstp[switchdst ? rgb_map[i] : i] = vsapi->getWritePtr(dst, i) + (vsapi->getFrameHeight(dst, i) - 1)*vsapi->getStride(dst, i);;
+                dst_stride[switchdst ? rgb_map[i] : i] = -vsapi->getStride(dst, i);
+            }
+        } else {
+            for (i = 0; i < d->vi.format->numPlanes; i++) {
+                dstp[switchdst ? rgb_map[i] : i] = vsapi->getWritePtr(dst, i);
+                dst_stride[switchdst ? rgb_map[i] : i] = vsapi->getStride(dst, i);
+            }
         }
 
         sws_scale(d->context, srcp, src_stride, 0, h, dstp, dst_stride);
@@ -240,9 +262,12 @@ static void VS_CC resizeCreate(const VSMap *in, VSMap *out, void *userData, VSCo
     d.lsrch = 0;
     d.lsrcw = 0;
     d.node = 0;
-    d.flags = (intptr_t)userData;
+    d.flags = int64ToIntS((intptr_t)userData);
     d.node = vsapi->propGetNode(in, "clip", 0, 0);
     d.vi = *vsapi->getVideoInfo(d.node);
+    if (d.vi.format && formatIdToPixelFormat(d.vi.format->id) == PIX_FMT_NONE)
+        RETERROR("Resize: input format not supported");
+
     dstwidth = int64ToIntS(vsapi->propGetInt(in, "width", 0, &err));
 
     if (err)

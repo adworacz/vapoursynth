@@ -1,11 +1,8 @@
 // vsfsavi2.cpp : VapourSynth Virtual File System
 //
-// VapourSynth modifications Copyright 2012 Fredrik Mellbin
-// This license header makes no sense. It was copied from
-// Avisynth and says that people who definitely never touched
-// the file claim copyright on it. Anyway, below is the complete
-// original notice, enjoy the GPL.
+// VapourSynth modifications Copyright 2012-2013 Fredrik Mellbin
 //
+// Original code from:
 // Avisynth v2.5.  Copyright 2008-2010 Ben Rudiak-Gould et al.
 // http://www.avisynth.org
 
@@ -23,24 +20,6 @@
 // along with this program; if not, write to the Free Software
 // Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA, or visit
 // http://www.gnu.org/copyleft/gpl.html .
-//
-// Linking Avisynth statically or dynamically with other modules is making a
-// combined work based on Avisynth.  Thus, the terms and conditions of the GNU
-// General Public License cover the whole combination.
-//
-// As a special exception, the copyright holders of Avisynth give you
-// permission to link Avisynth with independent modules that communicate with
-// Avisynth solely through the interfaces defined in avisynth.h, regardless of
-// the license terms of these independent modules, and to copy and distribute
-// the resulting combined work under terms of your choice, provided that
-// every copy of the combined work is accompanied by a complete copy of
-// the source code of Avisynth (the version of Avisynth used to produce the
-// combined work), being distributed under the terms of the GNU General
-// Public License plus this exception.  An independent module is a module
-// which is not derived from or based on Avisynth, such as 3rd-party filters,
-// import and export plugins, or graphical user interfaces.
-
-
 
 //----------------------------------------------------------------------------
 // Implementation Notes.
@@ -232,7 +211,7 @@ struct _avisuperindex_entry {                        AVISTDINDEX_ENTRY aIndex[AN
 DWORDLONG qwOffset;
 DWORD dwSize;                                    } AVISTDINDEX;
 DWORD dwDuration;
-} aIndex[ANYSIZE_ARRAY];                         	 typedef struct _avistdindex_entry {
+} aIndex[ANYSIZE_ARRAY];                              typedef struct _avistdindex_entry {
 DWORD dwOffset;
 } AVISUPERINDEX;                                       DWORD dwSize;
 } AVISTDINDEX_ENTRY; */
@@ -1196,7 +1175,7 @@ static void copyPlane(
         const unsigned pitch   = vsapi->getStride(frame, plane);
 
         if (offset < plsize) {
-            unsigned size = min(plsize - offset, rqsize);
+            unsigned size = std::min(plsize - offset, rqsize);
 
             const uint8_t* data = vsapi->getReadPtr(frame, plane);
 
@@ -1206,7 +1185,7 @@ static void copyPlane(
             rqsize -= size;
 
             while (size > 0) {
-                unsigned xfer = min(rowsize-initoff, size);
+                unsigned xfer = std::min(rowsize-initoff, size);
                 memcpy(buffer, data+initoff, xfer);
                 buffer += xfer;
                 size   -= xfer;
@@ -1241,7 +1220,7 @@ bool/*success*/ AvfsAvi2File::GetFrameData(
         } else if (semi_packed_p10) {
             const unsigned plsize1 = vi.width * vi.height * vi.format->bytesPerSample;
             if (offset < plsize1 && size > 0) {
-                int cpsize = min(plsize1 - offset, size);
+                int cpsize = std::min(plsize1 - offset, size);
                 memcpy(buffer, avs->GetExtraPlane1() + offset, cpsize);
                 size -= cpsize;
                 buffer += cpsize;
@@ -1282,7 +1261,7 @@ bool/*success*/ AvfsAvi2File::ReadMedia(
 
     bool success = true;
     uint64_t fileOffset = inFileOffset;
-    unsigned remainingSize = inRequestedSize;
+    unsigned remainingSize = static_cast<unsigned>(inRequestedSize);
     uint8_t* buffer = static_cast<uint8_t*>(inBuffer);
     unsigned segi = 0;
     unsigned offset = 0;

@@ -116,12 +116,13 @@ VS_EXTERN_C void VS_CC addBordersProcessCUDA(const VSFrameRef *src, VSFrameRef *
 typedef struct {
     VSFrameRef *f;
     VSVideoInfo vi;
+    int keep;
+    union {
+        uint32_t i[3];
+        float f[3];
+    } color;
+    int gpu;
 } BlankClipData;
-
-union color{
-    uint32_t i[3];
-    float f[3];
-};
 
 template<typename T>
 static __global__ void blankClipKernel(uint8_t *dstp, int stride, int width, int height, uint32_t color) {

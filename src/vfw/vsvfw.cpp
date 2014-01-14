@@ -25,13 +25,14 @@
 #include <objbase.h>
 #include <vfw.h>
 #include <windows.h>
-#include <cstdio>
-#include <cassert>
+#include <stdio.h>
+#include <assert.h>
 #include <string>
 #include <algorithm>
 #include <fstream>
 #include <string>
-#include <cerrno>
+#include <errno.h>
+#include <mutex>
 
 #include "VSScript.h"
 #include "VSHelper.h"
@@ -43,7 +44,7 @@ static int BMPSize(int height, int rowsize) {
 }
 
 // {58F74CA0-BD0E-4664-A49B-8D10E6F0C131}
-extern "C" const GUID CLSID_VapourSynth = 
+extern "C" const GUID CLSID_VapourSynth =
 { 0x58f74ca0, 0xbd0e, 0x4664, { 0xa4, 0x9b, 0x8d, 0x10, 0xe6, 0xf0, 0xc1, 0x31 } };
 
 extern "C" const GUID IID_IAvisynthClipInfo   // {E6D6B708-124D-11D4-86F3-DB80AFD98778}
@@ -58,19 +59,19 @@ struct IAvisynthClipInfo : IUnknown {
 class VapourSynthFile: public IAVIFile, public IPersistFile, public IClassFactory, public IAvisynthClipInfo {
     friend class VapourSynthStream;
 private:
-	int num_threads;
-	const VSAPI *vsapi;
-	VSScript *se;
-	bool enable_v210;
-	bool pad_scanlines;
-	VSNodeRef *node;
+    int num_threads;
+    const VSAPI *vsapi;
+    VSScript *se;
+    bool enable_v210;
+    bool pad_scanlines;
+    VSNodeRef *node;
     long m_refs;
     std::string szScriptName;
     const VSVideoInfo* vi;
     std::string error_msg;
     volatile long pending_requests;
 
-    CRITICAL_SECTION cs_filter_graph;
+    std::mutex cs_filter_graph;
 
     bool DelayInit();
     bool DelayInit2();
@@ -147,7 +148,7 @@ public:
 
     //////////// IAVIStream
 
-    STDMETHODIMP Create(LONG lParam1, LONG lParam2);
+    STDMETHODIMP Create(LPARAM lParam1, LPARAM lParam2);
     STDMETHODIMP Delete(LONG lStart, LONG lSamples);
     STDMETHODIMP_(LONG) Info(AVISTREAMINFOW *psi, LONG lSize);
     STDMETHODIMP_(LONG) FindSample(LONG lPos, LONG lFlags);
@@ -156,7 +157,7 @@ public:
     STDMETHODIMP ReadFormat(LONG lPos, LPVOID lpFormat, LONG *lpcbFormat);
     STDMETHODIMP SetFormat(LONG lPos, LPVOID lpFormat, LONG cbFormat);
     STDMETHODIMP Write(LONG lStart, LONG lSamples, LPVOID lpBuffer,
-        LONG cbBuffer, DWORD dwFlags, LONG FAR *plSampWritten, 
+        LONG cbBuffer, DWORD dwFlags, LONG FAR *plSampWritten,
         LONG FAR *plBytesWritten);
     STDMETHODIMP WriteData(DWORD fcc, LPVOID lpBuffer, LONG cbBuffer);
     STDMETHODIMP SetInfo(AVISTREAMINFOW *psi, LONG lSize);
@@ -182,17 +183,15 @@ private:
 
 BOOL APIENTRY DllMain(HANDLE hModule, ULONG ulReason, LPVOID lpReserved) {
     if (ulReason == DLL_PROCESS_ATTACH) {
-		// fixme, move this where threading can't be an issue
-		vseval_init();
+        // fixme, move this where threading can't be an issue
+        vsscript_init();
     } else if (ulReason == DLL_PROCESS_DETACH) {
-		vseval_finalize();
+        vsscript_finalize();
     }
     return TRUE;
 }
 
 // From the Microsoft AVIFile docs.  Dense code...
-
-extern "C" STDAPI DllGetClassObject(const CLSID& rclsid, const IID& riid, void **ppv);
 
 STDAPI DllGetClassObject(const CLSID& rclsid, const IID& riid, void **ppv) {
 
@@ -202,8 +201,6 @@ STDAPI DllGetClassObject(const CLSID& rclsid, const IID& riid, void **ppv) {
     return hresult;
 }
 
-extern "C" STDAPI DllCanUnloadNow();
-
 STDAPI DllCanUnloadNow() {
     return refCount ? S_FALSE : S_OK;
 }
@@ -211,13 +208,13 @@ STDAPI DllCanUnloadNow() {
 
 ///////////////////////////////////////////////////////////////////////////
 //
-//	VapourSynthFile
+//    VapourSynthFile
 //
 ///////////////////////////////////////////////////////////////////////////
 //////////// IClassFactory
 
 STDMETHODIMP VapourSynthFile::CreateInstance (LPUNKNOWN pUnkOuter, REFIID riid,  void * * ppvObj) {
-    if (pUnkOuter) 
+    if (pUnkOuter)
         return CLASS_E_NOAGGREGATION;
     HRESULT hresult = Create(CLSID_VapourSynth, riid, ppvObj);
     return hresult;
@@ -243,7 +240,7 @@ STDMETHODIMP VapourSynthFile::IsDirty() {
 
 STDMETHODIMP VapourSynthFile::Load(LPCOLESTR lpszFileName, DWORD grfMode) {
     char filename[MAX_PATH*2];
-    WideCharToMultiByte(CP_UTF8, 0, lpszFileName, -1, filename, sizeof(filename), NULL, NULL); 
+    WideCharToMultiByte(CP_UTF8, 0, lpszFileName, -1, filename, sizeof(filename), NULL, NULL);
     return Open(filename, grfMode, lpszFileName);
 }
 
@@ -319,7 +316,7 @@ STDMETHODIMP_(ULONG) VapourSynthFile::Release() {
 
 ////////////////////////////////////////////////////////////////////////
 //
-//		VapourSynthStream
+//        VapourSynthStream
 //
 ////////////////////////////////////////////////////////////////////////
 //////////// IUnknown
@@ -360,7 +357,7 @@ STDMETHODIMP_(ULONG) VapourSynthStream::Release() {
 
 ////////////////////////////////////////////////////////////////////////
 //
-//		VapourSynthFile
+//        VapourSynthFile
 //
 ////////////////////////////////////////////////////////////////////////
 //////////// IAVIFile
@@ -396,9 +393,8 @@ STDMETHODIMP VapourSynthFile::DeleteStream(DWORD fccType, LONG lParam) {
 /////// local
 
 VapourSynthFile::VapourSynthFile(const CLSID& rclsid) : num_threads(1), node(NULL), se(NULL), vsapi(NULL), enable_v210(false), pad_scanlines(false), m_refs(0), vi(NULL), pending_requests(0) {
-	vsapi = vseval_getVSApi();
+    vsapi = vsscript_getVSApi();
     AddRef();
-    InitializeCriticalSection(&cs_filter_graph);
 }
 
 VapourSynthFile::~VapourSynthFile() {
@@ -407,10 +403,9 @@ VapourSynthFile::~VapourSynthFile() {
         while (pending_requests > 0) {};
         vi = NULL;
         vsapi->freeNode(node);
-        vseval_freeScript(se);
+        vsscript_freeScript(se);
     }
     Unlock();
-    DeleteCriticalSection(&cs_filter_graph);
 }
 
 int VapourSynthFile::ImageSize() {
@@ -451,46 +446,29 @@ bool VapourSynthFile::DelayInit() {
     return result;
 }
 
-const char *ErrorScript = "\
+const char *ErrorScript1 = "\
 import vapoursynth as vs\n\
 import sys\n\
 core = vs.get_core()\n\
-red = core.std.BlankClip(width=240, height=480, format=vs.RGB24, color=[255, 0, 0])\n\
-green = core.std.BlankClip(width=240, height=480, format=vs.RGB24, color=[0, 255, 0])\n\
-blue = core.std.BlankClip(width=240, height=480, format=vs.RGB24, color=[0, 0, 255])\n\
+w = 340\n\
+h = 600\n\
+red = core.std.BlankClip(width=w, height=h, format=vs.RGB24, color=[255, 0, 0])\n\
+green = core.std.BlankClip(width=w, height=h, format=vs.RGB24, color=[0, 255, 0])\n\
+blue = core.std.BlankClip(width=w, height=h, format=vs.RGB24, color=[0, 0, 255])\n\
 stacked = core.std.StackHorizontal([red, green, blue])\n\
-last = core.resize.Bicubic(stacked, format=vs.COMPATBGR32)\n\
-last.set_output()\n";
+msg = core.text.Text(stacked, r\"\"\"";
 
-std::string get_file_contents(const char *filename)
-{
-  std::ifstream in(filename, std::ios::in | std::ios::binary);
-  if (in)
-  {
-    std::string contents;
-    in.seekg(0, std::ios::end);
-    contents.resize(in.tellg());
-    in.seekg(0, std::ios::beg);
-    in.read(&contents[0], contents.size());
-    in.close();
-    return(contents);
-  }
-  return "";;
-}
+const char *ErrorScript2 = "\"\"\")\n\
+final = core.resize.Bilinear(msg, format=vs.COMPATBGR32)\n\
+final.set_output()\n";
 
 bool VapourSynthFile::DelayInit2() {
     if (!szScriptName.empty() && !vi) {
-
-		std::string script = get_file_contents(szScriptName.c_str());
-		if (script.empty())
-			goto vpyerror;
-
-		if (!vseval_evaluateScript(&se, script.c_str(), szScriptName.c_str())) {
-			
-			node = vseval_getOutput(se, 0);
-			if (!node)
-				goto vpyerror;
-			vi = vsapi->getVideoInfo(node);
+        if (!vsscript_evaluateFile(&se, szScriptName.c_str(), efSetWorkingDir)) {
+            node = vsscript_getOutput(se, 0);
+            if (!node)
+                goto vpyerror;
+            vi = vsapi->getVideoInfo(node);
             error_msg.clear();
 
             if (vi->width == 0 || vi->height == 0 || vi->format == NULL || vi->numFrames == 0) {
@@ -517,37 +495,40 @@ bool VapourSynthFile::DelayInit2() {
                 goto vpyerror;
             }
 
-			// set the special options hidden in global variables
-			int error;
-			int64_t val;
-			VSMap *options = vsapi->createMap();
-			vseval_getVariable(se, "enable_v210", options);
-			val = vsapi->propGetInt(options, "enable_v210", 0, &error);
-			if (!error)
-				enable_v210 = !!val;
-			else
-				enable_v210 = false;
-			vseval_getVariable(se, "pad_scanlines", options);
-			val = vsapi->propGetInt(options, "pad_scanlines", 0, &error);
-			if (!error)
-				pad_scanlines = !!val;
-			else
-				pad_scanlines = false;
-			vsapi->freeMap(options);
+            // set the special options hidden in global variables
+            int error;
+            int64_t val;
+            VSMap *options = vsapi->createMap();
+            vsscript_getVariable(se, "enable_v210", options);
+            val = vsapi->propGetInt(options, "enable_v210", 0, &error);
+            if (!error)
+                enable_v210 = !!val;
+            else
+                enable_v210 = false;
+            vsscript_getVariable(se, "pad_scanlines", options);
+            val = vsapi->propGetInt(options, "pad_scanlines", 0, &error);
+            if (!error)
+                pad_scanlines = !!val;
+            else
+                pad_scanlines = false;
+            vsapi->freeMap(options);
 
-			const VSCoreInfo *info = vsapi->getCoreInfo(vseval_getCore(se));
-			num_threads = info->numThreads;
+            const VSCoreInfo *info = vsapi->getCoreInfo(vsscript_getCore(se));
+            num_threads = info->numThreads;
 
             return true;
         } else {
-			error_msg = vseval_getError(se);
+            error_msg = vsscript_getError(se);
             vpyerror:
             vi = NULL;
-			vseval_freeScript(se);
-			se = NULL;
-            int res = vseval_evaluateScript(&se, ErrorScript, "vfw_error.bleh");
-			const char *et = vseval_getError(se);
-			node = vseval_getOutput(se, 0);
+            vsscript_freeScript(se);
+            se = NULL;
+            std::string error_script = ErrorScript1;
+            error_script += error_msg;
+            error_script += ErrorScript2;
+            int res = vsscript_evaluateScript(&se, error_script.c_str(), "vfw_error.bleh", 0);
+            const char *et = vsscript_getError(se);
+            node = vsscript_getOutput(se, 0);
             vi = vsapi->getVideoInfo(node);
             return true;
         }
@@ -557,11 +538,11 @@ bool VapourSynthFile::DelayInit2() {
 }
 
 void VapourSynthFile::Lock() {
-    EnterCriticalSection(&cs_filter_graph);
+    cs_filter_graph.lock();
 }
 
 void VapourSynthFile::Unlock() {
-    LeaveCriticalSection(&cs_filter_graph);
+    cs_filter_graph.unlock();
 }
 
 ///////////////////////////////////////////////////
@@ -577,19 +558,19 @@ STDMETHODIMP VapourSynthFile::Info(AVIFILEINFOW *pfi, LONG lSize) {
     AVIFILEINFOW afi;
     memset(&afi, 0, sizeof(afi));
 
-    afi.dwMaxBytesPerSec	= 0;
-    afi.dwFlags				= AVIFILEINFO_HASINDEX | AVIFILEINFO_ISINTERLEAVED;
-    afi.dwCaps				= AVIFILECAPS_CANREAD | AVIFILECAPS_ALLKEYFRAMES | AVIFILECAPS_NOCOMPRESSION;
+    afi.dwMaxBytesPerSec    = 0;
+    afi.dwFlags                = AVIFILEINFO_HASINDEX | AVIFILEINFO_ISINTERLEAVED;
+    afi.dwCaps                = AVIFILECAPS_CANREAD | AVIFILECAPS_ALLKEYFRAMES | AVIFILECAPS_NOCOMPRESSION;
 
-    afi.dwStreams				= 1;
-    afi.dwSuggestedBufferSize	= 0;
-    afi.dwWidth					= vi->width;
-    afi.dwHeight				= vi->height;
-    afi.dwEditCount				= 0;
+    afi.dwStreams                = 1;
+    afi.dwSuggestedBufferSize    = 0;
+    afi.dwWidth                    = vi->width;
+    afi.dwHeight                = vi->height;
+    afi.dwEditCount                = 0;
 
-    afi.dwRate					= int64ToIntS(vi->fpsNum ? vi->fpsNum : 1);
-    afi.dwScale					= int64ToIntS(vi->fpsDen ? vi->fpsDen : 30);
-    afi.dwLength				= vi->numFrames;
+    afi.dwRate                    = int64ToIntS(vi->fpsNum ? vi->fpsNum : 1);
+    afi.dwScale                    = int64ToIntS(vi->fpsDen ? vi->fpsDen : 30);
+    afi.dwLength                = vi->numFrames;
 
     wcscpy(afi.szFileType, L"VapourSynth");
 
@@ -673,7 +654,7 @@ bool __stdcall VapourSynthFile::IsFieldBased() {
 
 ////////////////////////////////////////////////////////////////////////
 //
-//		VapourSynthStream
+//        VapourSynthStream
 //
 ////////////////////////////////////////////////////////////////////////
 //////////// IAVIStreaming
@@ -688,7 +669,7 @@ STDMETHODIMP VapourSynthStream::End() {
 
 //////////// IAVIStream
 
-STDMETHODIMP VapourSynthStream::Create(LONG lParam1, LONG lParam2) {
+STDMETHODIMP VapourSynthStream::Create(LPARAM lParam1, LPARAM lParam2) {
     return AVIERR_READONLY;
 }
 
@@ -750,26 +731,26 @@ STDMETHODIMP_(LONG) VapourSynthStream::Info(AVISTREAMINFOW *psi, LONG lSize) {
     else if (vi->format->id == pfCompatYUY2)
         asi.fccHandler = '2YUY';
     else if (vi->format->id == pfYUV420P8)
-        asi.fccHandler = '21VY'; 
+        asi.fccHandler = '21VY';
     else if (vi->format->id == pfGray8)
-        asi.fccHandler = '008Y'; 
+        asi.fccHandler = '008Y';
     else if (vi->format->id == pfYUV444P8)
-        asi.fccHandler = '42VY'; 
+        asi.fccHandler = '42VY';
     else if (vi->format->id == pfYUV422P8)
-        asi.fccHandler = '61VY'; 
+        asi.fccHandler = '61VY';
     else if (vi->format->id == pfYUV411P8)
-        asi.fccHandler = 'B14Y'; 
-    else if (vi->format->id == pfYUV410P8) 
-        asi.fccHandler = '9UVY'; 
-    else if (vi->format->id == pfYUV420P10) 
+        asi.fccHandler = 'B14Y';
+    else if (vi->format->id == pfYUV410P8)
+        asi.fccHandler = '9UVY';
+    else if (vi->format->id == pfYUV420P10)
         asi.fccHandler = '010P';
-    else if (vi->format->id == pfYUV420P16) 
+    else if (vi->format->id == pfYUV420P16)
         asi.fccHandler = '610P';
-    else if (vi->format->id == pfYUV422P10 && parent->enable_v210) 
+    else if (vi->format->id == pfYUV422P10 && parent->enable_v210)
         asi.fccHandler = '012v';
-    else if (vi->format->id == pfYUV422P10) 
+    else if (vi->format->id == pfYUV422P10)
         asi.fccHandler = '012P';
-    else if (vi->format->id == pfYUV422P16) 
+    else if (vi->format->id == pfYUV422P16)
         asi.fccHandler = '612P';
     else
         return E_FAIL;
@@ -997,31 +978,31 @@ STDMETHODIMP VapourSynthStream::ReadFormat(LONG lPos, LPVOID lpFormat, LONG *lpc
         bi.biBitCount +=  (bi.biBitCount * 2) >> (vi->format->subSamplingH + vi->format->subSamplingW);
     if (parent->enable_v210 && vi->format->id == pfYUV422P10)
         bi.biBitCount = 20;
-    if (vi->format->id == pfCompatBGR32) 
+    if (vi->format->id == pfCompatBGR32)
         bi.biCompression = BI_RGB;
-    else if (vi->format->id == pfCompatYUY2) 
+    else if (vi->format->id == pfCompatYUY2)
         bi.biCompression = '2YUY';
-    else if (vi->format->id == pfYUV420P8) 
+    else if (vi->format->id == pfYUV420P8)
         bi.biCompression = '21VY';
-    else if (vi->format->id == pfGray8) 
-        bi.biCompression = '008Y'; 
-    else if (vi->format->id == pfYUV444P8) 
-        bi.biCompression = '42VY'; 
-    else if (vi->format->id == pfYUV422P8) 
-        bi.biCompression = '61VY'; 
-    else if (vi->format->id == pfYUV411P8) 
-        bi.biCompression = 'B14Y'; 
-    else if (vi->format->id == pfYUV410P8) 
+    else if (vi->format->id == pfGray8)
+        bi.biCompression = '008Y';
+    else if (vi->format->id == pfYUV444P8)
+        bi.biCompression = '42VY';
+    else if (vi->format->id == pfYUV422P8)
+        bi.biCompression = '61VY';
+    else if (vi->format->id == pfYUV411P8)
+        bi.biCompression = 'B14Y';
+    else if (vi->format->id == pfYUV410P8)
         bi.biCompression = '9UVY';
-    else if (vi->format->id == pfYUV420P10) 
+    else if (vi->format->id == pfYUV420P10)
         bi.biCompression = '010P';
-    else if (vi->format->id == pfYUV420P16) 
+    else if (vi->format->id == pfYUV420P16)
         bi.biCompression = '610P';
-    else if (vi->format->id == pfYUV422P10 && parent->enable_v210) 
+    else if (vi->format->id == pfYUV422P10 && parent->enable_v210)
         bi.biCompression = '012v';
-    else if (vi->format->id == pfYUV422P10) 
+    else if (vi->format->id == pfYUV422P10)
         bi.biCompression = '012P';
-    else if (vi->format->id == pfYUV422P16) 
+    else if (vi->format->id == pfYUV422P16)
         bi.biCompression = '612P';
     else
         return E_FAIL;
@@ -1034,7 +1015,7 @@ STDMETHODIMP VapourSynthStream::ReadFormat(LONG lPos, LPVOID lpFormat, LONG *lpc
 }
 
 STDMETHODIMP VapourSynthStream::Write(LONG lStart, LONG lSamples, LPVOID lpBuffer,
-    LONG cbBuffer, DWORD dwFlags, LONG FAR *plSampWritten, 
+    LONG cbBuffer, DWORD dwFlags, LONG FAR *plSampWritten,
     LONG FAR *plBytesWritten) {
         return AVIERR_READONLY;
 }

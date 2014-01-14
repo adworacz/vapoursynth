@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2012 Fredrik Mellbin
+* Copyright (c) 2012-2013 Fredrik Mellbin
 *
 * This file is part of VapourSynth.
 *
@@ -20,40 +20,45 @@
 
 #include "avisynth_compat.h"
 #include "../core/x86utils.h"
+#include "../core/vslog.h"
+#include <codecvt>
+#include <algorithm>
 
 namespace AvisynthCompat {
 
 const VSFrameRef *FakeAvisynth::avsToVSFrame(VideoFrame *frame) {
     const VSFrameRef *ref = NULL;
-    QMap<VideoFrame *, const VSFrameRef *>::Iterator it = ownedFrames.find(frame);
+    std::map<VideoFrame *, const VSFrameRef *>::iterator it = ownedFrames.find(frame);
 
-    if (it != ownedFrames.end())
-        ref = vsapi->cloneFrameRef(it.value());
-    else
-        qFatal("unreachable condition");
+    if (it != ownedFrames.end()) {
+        ref = vsapi->cloneFrameRef(it->second);
+    } else {
+        vsFatal("unreachable condition");
+        assert(false);
+    }
 
     it = ownedFrames.begin();
 
     while (it != ownedFrames.end()) {
-        if (it.key()->GetRefCount() == 0 || it.key()->GetRefCount() == 9000) {
-            delete it.key();
-            vsapi->freeFrame(it.value());
+        if (it->first->GetRefCount() == 0 || it->first->GetRefCount() == 9000) {
+            delete it->first;
+            vsapi->freeFrame(it->second);
             it = ownedFrames.erase(it);
         } else {
             ++it;
         }
     }
 
-    Q_ASSERT(ref);
+    assert(ref);
     return ref;
 }
 
 FakeAvisynth::~FakeAvisynth() {
-    QMap<VideoFrame *, const VSFrameRef *>::Iterator it = ownedFrames.begin();
+    std::map<VideoFrame *, const VSFrameRef *>::iterator it = ownedFrames.begin();
 
     while (it != ownedFrames.end()) {
-        delete it.key();
-        vsapi->freeFrame(it.value());
+        delete it->first;
+        vsapi->freeFrame(it->second);
         it = ownedFrames.erase(it);
     }
 
@@ -66,15 +71,14 @@ long FakeAvisynth::GetCPUFlags() {
 }
 
 char *FakeAvisynth::SaveString(const char *s, int length) {
-    if (length >= 0) {
-        QByteArray b(s, length);
-        savedStrings.append(b);
-    } else {
-        QByteArray b(s);
-        savedStrings.append(b);
-    }
+    if (length >= 0)
+        savedStrings.push_back(std::string(s, length));
+    else
+        savedStrings.push_back(std::string(s));
 
-    return savedStrings.last().data();
+    // UGLY
+    // Cast away the const because nobody would actually try to write to a saved string (except possibly an avisynth plugin developer)
+    return const_cast<char *>(savedStrings.back().c_str());
 }
 
 char *FakeAvisynth::Sprintf(const char *fmt, ...) {
@@ -86,20 +90,15 @@ char *FakeAvisynth::Sprintf(const char *fmt, ...) {
 }
 
 char *FakeAvisynth::VSprintf(const char *fmt, void *val) {
-    char *buf = NULL;
+    std::vector<char> buf;
     int size = 0, count = -1;
 
     while (count == -1) {
-        if (buf)
-            delete[] buf;
-
-        size += 4096;
-        buf = new char[size];
-        count = vsnprintf(buf, size - 1, fmt, (va_list)val);
+        buf.resize(buf.size() + 4096);
+        count = vsnprintf(&buf[0], size - 1, fmt, (va_list)val);
     }
 
-    char *i = SaveString(buf);
-    delete[] buf;
+    char *i = SaveString(&buf[0]);
     return i;
 }
 
@@ -113,7 +112,7 @@ void FakeAvisynth::ThrowError(const char *fmt, ...) {
     throw AvisynthError(SaveString(buf));
 }
 
-static QString charToFilterArgumentString(char c) {
+static std::string charToFilterArgumentString(char c) {
     switch (c) {
     case 'i':
     case 'b':
@@ -125,28 +124,33 @@ static QString charToFilterArgumentString(char c) {
     case 'c':
         return "clip";
     default:
-        qFatal("Avisynth Compat: invalid argument type character, I quit");
+        vsFatal("Avisynth Compat: invalid argument type character, I quit");
         return "";
     }
 }
 
 PVideoFrame VSClip::GetFrame(int n, IScriptEnvironment *env) {
     const VSFrameRef *ref;
-    n = qBound(0, n, vi.num_frames - 1);
+    n = std::min(std::max(0, n), vi.num_frames - 1);
 
     if (fakeEnv->initializing)
         ref = vsapi->getFrame(n, clip, 0, 0);
     else
         ref = vsapi->getFrameFilter(n, clip, fakeEnv->uglyCtx);
 
+    std::vector<char> buf(1024);
+
     if (!ref) {
-        QByteArray s = QByteArray("Avisynth Compat: requested frame ") + QString::number(n).toUtf8() + QByteArray(" not prefetched, using slow method");
-        qWarning(s);
-        ref = vsapi->getFrame(n, clip, NULL, 0);
+        if (numSlowWarnings < 200) {
+            numSlowWarnings++;
+            std::string s = std::string("Avisynth Compat: requested frame ") + std::to_string(n) + std::string(" not prefetched, using slow method");
+            vsWarning("%s", s.c_str());
+        }
+        ref = vsapi->getFrame(n, clip, &buf[0], buf.size());
     }
 
     if (!ref)
-        qFatal("Avisynth Compat: unlikely error");
+        vsFatal("Avisynth Compat: error while getting input frame synchronously: %s", &buf[0]);
 
     bool isYV12 = vi.IsYV12();
 
@@ -163,12 +167,12 @@ PVideoFrame VSClip::GetFrame(int n, IScriptEnvironment *env) {
         isYV12 ? vsapi->getReadPtr(ref, 2) - firstPlanePtr : 0,
         isYV12 ? vsapi->getStride(ref, 1) : 0);
     PVideoFrame pvf(vfb);
-    fakeEnv->ownedFrames.insert(vfb, ref);
+    fakeEnv->ownedFrames.insert(std::make_pair(vfb, ref));
     return pvf;
 }
 
-WrappedClip::WrappedClip(const PClip &clip, const QList<VSNodeRef *> &preFetchClips, const PrefetchInfo &prefetchInfo, FakeAvisynth *fakeEnv)
-    : prefetchInfo(prefetchInfo), preFetchClips(preFetchClips), clip(clip), fakeEnv(fakeEnv),
+WrappedClip::WrappedClip(const std::string &filterName, const PClip &clip, const std::vector<VSNodeRef *> &preFetchClips, const PrefetchInfo &prefetchInfo, FakeAvisynth *fakeEnv)
+    : filterName(filterName), prefetchInfo(prefetchInfo), preFetchClips(preFetchClips), clip(clip), fakeEnv(fakeEnv),
       magicalNumAudioSamplesForMVTools(clip->GetVideoInfo().num_audio_samples),
       magicalNChannelsForMVTools(clip->GetVideoInfo().nchannels) {
 }
@@ -185,8 +189,8 @@ static void prefetchHelper(int n, VSNodeRef *node, const PrefetchInfo &p, VSFram
     }
 }
 
-#define WARNING(fname, warning) if (name == #fname) qWarning(QByteArray("Avisynth Compat: ") + #fname + " - " + #warning);
-#define BROKEN(fname) if (name == #fname) qWarning(QByteArray("Avisynth Compat: Invoking known broken function ") + name);
+#define WARNING(fname, warning) if (name == #fname) vsWarning("%s", (std::string("Avisynth Compat: ") + #fname + " - " + #warning).c_str());
+#define BROKEN(fname) if (name == #fname) vsWarning("%s", ("Avisynth Compat: Invoking known broken function " + name).c_str());
 #define OTHER(fname) if (name == #fname) return PrefetchInfo(1, 1, 0, 0);
 #define SOURCE(fname) if (name == #fname) return PrefetchInfo(1, 1, 0, 0);
 #define PREFETCHR0(fname) if (name == #fname) return PrefetchInfo(1, 1, 0, 0);
@@ -195,10 +199,9 @@ static void prefetchHelper(int n, VSNodeRef *node, const PrefetchInfo &p, VSFram
 #define PREFETCHR3(fname) if (name == #fname) return PrefetchInfo(1, 1, -3, 3);
 #define PREFETCH(fname, div, mul, from, to) if (name == #fname) return PrefetchInfo(div, mul, from, to);
 
-static PrefetchInfo getPrefetchInfo(const QByteArray &name, const VSMap *in, const VSAPI *vsapi) {
+static PrefetchInfo getPrefetchInfo(const std::string &name, const VSMap *in, const VSAPI *vsapi) {
     int err;
     int temp;
-    int temp2;
     // FFMS2
     OTHER(FFIndex)
     SOURCE(FFVideoSource)
@@ -207,7 +210,7 @@ static PrefetchInfo getPrefetchInfo(const QByteArray &name, const VSMap *in, con
     OTHER(FFGetLogLevel)
     OTHER(FFGetVersion)
     // TNLMeans
-    temp = vsapi->propGetInt(in, "Az", 0, &err);
+    temp = int64ToIntS(vsapi->propGetInt(in, "Az", 0, &err));
     PREFETCH(TNLMeans, 1, 1, -temp, temp)
     // yadif*
     PREFETCHR1(Yadif)
@@ -220,24 +223,22 @@ static PrefetchInfo getPrefetchInfo(const QByteArray &name, const VSMap *in, con
     PREFETCHR0(nnedi3)
     PREFETCHR0(nnedi3_rpow2)
     // mixed Tritical
+    temp = int64ToIntS(vsapi->propGetInt(in, "mode", 0, &err));
+    switch(temp) {
+    case 0:
+    case -1:
+    case -2:
+        PREFETCHR2(TDeint); break;
+    case 2:
+        PREFETCHR3(TDeint); break;
+    case 1:
+        PREFETCH(TDeint, 2, 1, -2, 2); break;
+    }
     BROKEN(ColorMatrix)
     PREFETCHR1(Cnr2)
-    temp = vsapi->propGetInt(in, "tbsize", 0, &err);
+    temp = int64ToIntS(vsapi->propGetInt(in, "tbsize", 0, &err));
     PREFETCH(dfttest, 1, 1, -(temp / 2), temp / 2)
-    // TIVTC;
-    PREFETCH(TFM, 1, 1, -5, 5) // probably suboptimal
-    temp = vsapi->propGetInt(in, "cycle", 0, &err);
 
-    if (temp < 2)
-        temp = 5;
-
-    temp2 = vsapi->propGetInt(in, "cycleR", 0, &err);
-
-    if (temp2 < 1)
-        temp2 = 1;
-
-    PREFETCH(TDecimate, temp - temp2, temp, 0, 0) // probably suboptimal
-    //PREFETCH(TDecimate, temp - temp2, temp, -temp, temp) // probably suboptimal
     // MPEG2DEC
     SOURCE(MPEG2Source)
     PREFETCHR0(LumaYV12)
@@ -248,7 +249,7 @@ static PrefetchInfo getPrefetchInfo(const QByteArray &name, const VSMap *in, con
     BROKEN(IsCombed)
     PREFETCHR0(FieldDeinterlace)
     PREFETCH(Telecide, 1, 1, -1, 10) // not goot
-    temp = vsapi->propGetInt(in, "cycle", 0, &err);
+    temp = int64ToIntS(vsapi->propGetInt(in, "cycle", 0, &err));
     PREFETCH(Decimate, temp - 1, temp, -temp, temp + 3) // probably suboptimal
     // Meowtools 2
     PREFETCHR0(mt_edge)
@@ -280,6 +281,8 @@ static PrefetchInfo getPrefetchInfo(const QByteArray &name, const VSMap *in, con
     OTHER(mt_ellipse)
     OTHER(mt_polish)
     // Mixed
+    BROKEN(RemoveGrain)
+    BROKEN(Repair)
     PREFETCHR0(VagueDenoiser)
     PREFETCHR0(UnDot)
     PREFETCHR0(SangNom)
@@ -293,23 +296,23 @@ static PrefetchInfo getPrefetchInfo(const QByteArray &name, const VSMap *in, con
     PREFETCHR0(AssRender)
     PREFETCHR0(TextSub)
     PREFETCHR0(VobSub)
-    PREFETCHR2(FFT3DGPU)
+    PREFETCHR2(fft3dGPU)
     PREFETCHR2(FFT3DFilter)
     PREFETCHR1(Convolution3D)
     PREFETCHR1(deen)
     PREFETCHR0(eDeen)
     // Mvtools
     PREFETCHR0(MSuper)
-    temp = vsapi->propGetInt(in, "delta", 0, &err);
+    temp = int64ToIntS(vsapi->propGetInt(in, "delta", 0, &err));
 
     if (temp < 1)
         temp = 1;
 
     PREFETCH(MAnalyse, 1, 1, -temp, temp)
-    PREFETCHR1(MDegrain1)
-    PREFETCHR2(MDegrain2)
+    PREFETCHR3(MDegrain1)
+    PREFETCHR3(MDegrain2)
     PREFETCHR3(MDegrain3)
-    PREFETCHR0(MCompensate)
+    PREFETCHR3(MCompensate)
     PREFETCHR0(MMask)
     PREFETCHR0(MSCDetection)
     PREFETCHR0(MShow)
@@ -325,14 +328,15 @@ static PrefetchInfo getPrefetchInfo(const QByteArray &name, const VSMap *in, con
     PREFETCH(Bob, 2, 1, 0, 0)
     PREFETCH(TemporalSoften, 1, 1, -5, 5)
 
-    return PrefetchInfo(1, 1, 0, 0);
+    // prefetch nothing by default
+    return PrefetchInfo(1, 1, 0, -1);
 }
 
 static void VS_CC avisynthFilterInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
     WrappedClip *clip = (WrappedClip *) * instanceData;
 
     if (!clip->preFetchClips.empty())
-        clip->fakeEnv->uglyNode = clip->preFetchClips.first();
+        clip->fakeEnv->uglyNode = clip->preFetchClips.front();
 
     const VideoInfo &viAvs = clip->clip->GetVideoInfo();
     ::VSVideoInfo vi;
@@ -358,9 +362,9 @@ static void VS_CC avisynthFilterInit(VSMap *in, VSMap *out, void **instanceData,
 static const VSFrameRef *VS_CC avisynthFilterGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     WrappedClip *clip = (WrappedClip *) * instanceData;
     PVideoFrame frame;
-    n = qMin(n, clip->clip->GetVideoInfo().num_frames - 1);
+    n = std::min(n, clip->clip->GetVideoInfo().num_frames - 1);
 
-    if (activationReason == arAllFramesReady || (activationReason == arInitial && clip->preFetchClips.empty())) {
+    if (activationReason == arAllFramesReady || (activationReason == arInitial && (clip->preFetchClips.empty() || clip->prefetchInfo.from > clip->prefetchInfo.to))) {
         // Ready the global stuff needed to make things work behind the scenes, the locking model makes this technically safe but quite ugly.
         // The frame number is needed to pass through frame attributes for filters that create a new frame to return, the context is for GetFrame().
         if (!clip->preFetchClips.empty()) {
@@ -372,19 +376,19 @@ static const VSFrameRef *VS_CC avisynthFilterGetFrame(int n, int activationReaso
             frame = clip->clip->GetFrame(n, clip->fakeEnv);
 
             if (!frame)
-                qFatal("Avisynth Error: no frame returned");
+                vsFatal("Avisynth Error: no frame returned");
         } catch (const AvisynthError &e) {
-            qFatal("Avisynth Error: avisynth errors in GetFrame() are unrecoverable, crashing... %s", e.msg);
+            vsFatal("Avisynth Error: avisynth errors in GetFrame() are unrecoverable, crashing... %s", e.msg);
         } catch (const IScriptEnvironment::NotFound &) {
-            qFatal("Avisynth Error: escaped IScriptEnvironment::NotFound exceptions are non-recoverable, crashing... ");
+            vsFatal("Avisynth Error: escaped IScriptEnvironment::NotFound exceptions are non-recoverable, crashing... ");
         } catch (...) {
-            qFatal("Avisynth Error: avisynth errors are unrecoverable, crashing...");
+            vsFatal("Avisynth Error: avisynth errors are unrecoverable, crashing...");
         }
 
         clip->fakeEnv->uglyCtx = NULL;
     } else if (activationReason == arInitial) {
-        foreach(VSNodeRef * c, clip->preFetchClips)
-        prefetchHelper(n, c, clip->prefetchInfo, frameCtx, vsapi);
+        for (VSNodeRef *c : clip->preFetchClips)
+            prefetchHelper(n, c, clip->prefetchInfo, frameCtx, vsapi);
     } else if (activationReason == arError) {
         return NULL;
     }
@@ -414,40 +418,48 @@ static void VS_CC fakeAvisynthFunctionWrapper(const VSMap *in, VSMap *out, void 
         VSCore *core, const VSAPI *vsapi) {
     WrappedFunction *wf = (WrappedFunction *)userData;
     FakeAvisynth *fakeEnv = new FakeAvisynth(core, vsapi);
-    QVector<AVSValue> inArgs(wf->parsedArgs.count());
-    QList<VSNodeRef *> preFetchClips;
+    std::vector<AVSValue> inArgs(wf->parsedArgs.size());
+    std::vector<VSNodeRef *> preFetchClips;
 
-    for (int i = 0; i < inArgs.count(); i++) {
+    for (size_t i = 0; i < inArgs.size(); i++) {
         const AvisynthArgs &parsedArg = wf->parsedArgs.at(i);
 
         if (vsapi->propNumElements(in, parsedArg.name.data()) > 0) {
             switch (parsedArg.type) {
             case 'i':
-                inArgs[i] = (int)vsapi->propGetInt(in, parsedArg.name.constData(), 0, NULL);
+                inArgs[i] = int64ToIntS(vsapi->propGetInt(in, parsedArg.name.c_str(), 0, NULL));
                 break;
             case 'f':
-                inArgs[i] = vsapi->propGetFloat(in, parsedArg.name.constData(), 0, NULL);
+                inArgs[i] = vsapi->propGetFloat(in, parsedArg.name.c_str(), 0, NULL);
                 break;
             case 'b':
-                inArgs[i] = (bool)vsapi->propGetInt(in, parsedArg.name.constData(), 0, NULL);
+                inArgs[i] = !!vsapi->propGetInt(in, parsedArg.name.c_str(), 0, NULL);
                 break;
             case 's':
-                inArgs[i] = vsapi->propGetData(in, parsedArg.name.constData(), 0, NULL);
+                inArgs[i] = vsapi->propGetData(in, parsedArg.name.c_str(), 0, NULL);
                 break;
             case 'c':
-                VSNodeRef *cr = vsapi->propGetNode(in, parsedArg.name.constData(), 0, NULL);
+                VSNodeRef *cr = vsapi->propGetNode(in, parsedArg.name.c_str(), 0, NULL);
+                const VSVideoInfo *vi = vsapi->getVideoInfo(cr);
+                if (!isConstantFormat(vi) || vi->numFrames == 0 || (vi->format->id != pfYUV420P8 && vi->format->id != pfCompatYUY2 && vi->format->id != pfCompatBGR32)) {
+                    vsapi->setError(out, "Invalid avisynth colorspace in one of the input clips");
+                    vsapi->freeNode(cr);
+                    delete fakeEnv;
+                    return;
+                }
+
                 const VSFrameRef *fr = vsapi->getFrame(0, cr, 0, 0);
                 int err;
                 int64_t numAudioSamples = vsapi->propGetInt(vsapi->getFramePropsRO(fr), "MVToolsHackNumAudioSamples", 0, &err);
-                int nChannels = vsapi->propGetInt(vsapi->getFramePropsRO(fr), "MVToolsHackNChannels", 0, &err);
-                preFetchClips.append(cr);
+                int nChannels = int64ToIntS(vsapi->propGetInt(vsapi->getFramePropsRO(fr), "MVToolsHackNChannels", 0, &err));
+                preFetchClips.push_back(cr);
                 inArgs[i] = new VSClip(cr, numAudioSamples, nChannels, fakeEnv, vsapi);
                 break;
             }
         }
     }
 
-    AVSValue inArgAVSValue(inArgs.data(), wf->parsedArgs.count());
+    AVSValue inArgAVSValue(inArgs.data(), wf->parsedArgs.size());
     AVSValue ret;
 
     try {
@@ -456,21 +468,22 @@ static void VS_CC fakeAvisynthFunctionWrapper(const VSMap *in, VSMap *out, void 
         vsapi->setError(out, e.msg);
         return;
     } catch (const IScriptEnvironment::NotFound &) {
-        qFatal("Avisynth Error: escaped IScriptEnvironment::NotFound exceptions are non-recoverable, crashing... ");
+        vsFatal("Avisynth Error: escaped IScriptEnvironment::NotFound exceptions are non-recoverable, crashing... ");
     }
 
     fakeEnv->initializing = false;
 
     if (ret.IsClip()) {
-        WrappedClip *filterData = new WrappedClip(ret.AsClip(), preFetchClips, getPrefetchInfo(wf->name, in, vsapi), fakeEnv);
+        PrefetchInfo prefetchInfo = getPrefetchInfo(wf->name, in, vsapi);
+        WrappedClip *filterData = new WrappedClip(wf->name, ret.AsClip(), preFetchClips, prefetchInfo, fakeEnv);
         vsapi->createFilter(
                                     in,
                                     out,
-                                    wf->name.constData(),
+                                    wf->name.c_str(),
                                     avisynthFilterInit,
                                     avisynthFilterGetFrame,
                                     avisynthFilterFree,
-                                    preFetchClips.empty() ? fmSerial : fmParallelRequests,
+                                    (preFetchClips.empty() || prefetchInfo.from > prefetchInfo.to) ? fmSerial : fmParallelRequests,
                                     0,
                                     filterData,
                                     core);
@@ -486,35 +499,41 @@ static void VS_CC fakeAvisynthFunctionWrapper(const VSMap *in, VSMap *out, void 
 }
 
 void FakeAvisynth::AddFunction(const char *name, const char *params, ApplyFunc apply, void *user_data) {
-    int paramLength = strlen(params);
-    int paramPos = 0;
+    size_t paramLength = strlen(params);
+    size_t paramPos = 0;
     int argNum = 1;
     int numArgs = 0;
-    QList<AvisynthArgs> parsedArgs;
-    QString newArgs;
+    std::vector<AvisynthArgs> parsedArgs;
+    std::string newArgs;
+    std::string name2(name);
+
+    if (name2 == "RemoveGrain" || name2 == "Repair" || name2 == "ColorMatrix" || name2 == "IsCombed") {
+        vsWarning("Avisynth Compat: rejected adding Avisynth function %s because it is too broken", name);
+        return;
+    }
 
     while (paramPos < paramLength) {
         if (params[paramPos] == '*' || params[paramPos] == '+' || params[paramPos] == '.') {
-            qWarning(QByteArray("Avisynth Compat: varargs not implemented so I'm just gonna skip importing ") + name);
+            vsWarning("%s", (std::string("Avisynth Compat: varargs not implemented so I'm just gonna skip importing ") + name).c_str());
             return;
         }
 
         if (params[paramPos] == '[') { // named argument start
-            QString argName(params);
-            int nameStart = ++paramPos;
+            std::string argName(params);
+            size_t nameStart = ++paramPos;
 
             while (paramPos < paramLength) {
                 if (params[paramPos++] == ']') {
-                    argName = argName.mid(nameStart, paramPos - nameStart - 1);
+                    argName = argName.substr(nameStart, paramPos - nameStart - 1);
                     break;
                 }
             }
 
-            newArgs += argName + QString(":") + charToFilterArgumentString(params[paramPos]) + QString(":opt;");
-            parsedArgs.append(AvisynthArgs(argName.toUtf8(), params[paramPos++], false));
+            newArgs += argName + ":" + charToFilterArgumentString(params[paramPos]) + ":opt;";
+            parsedArgs.push_back(AvisynthArgs(argName, params[paramPos++], false));
         } else {
-            newArgs += params[paramPos] + QString::number(argNum) + QString(":") + charToFilterArgumentString(params[paramPos]) + QString(";");
-            parsedArgs.append(AvisynthArgs((params[paramPos] + QString::number(argNum)).toUtf8(), params[paramPos], true));
+            newArgs += params[paramPos] + std::to_string(argNum) + ":" + charToFilterArgumentString(params[paramPos]) + ";";
+            parsedArgs.push_back(AvisynthArgs((params[paramPos] + std::to_string(argNum)), params[paramPos], true));
             paramPos++;
             argNum++;
         }
@@ -522,25 +541,25 @@ void FakeAvisynth::AddFunction(const char *name, const char *params, ApplyFunc a
         numArgs++;
     }
 
-    vsapi->registerFunction(name, newArgs.toUtf8().constData(), fakeAvisynthFunctionWrapper, new WrappedFunction(name, apply, parsedArgs, user_data), vsapi->getPluginId("com.vapoursynth.avisynth", core));
+    vsapi->registerFunction(name, newArgs.c_str(), fakeAvisynthFunctionWrapper, new WrappedFunction(name, apply, parsedArgs, user_data), vsapi->getPluginById("com.vapoursynth.avisynth", core));
 }
 
 bool FakeAvisynth::FunctionExists(const char *name) {
-    qFatal("FunctionExists not implemented");
+    vsFatal("FunctionExists not implemented");
     return false;
 }
 
 AVSValue FakeAvisynth::Invoke(const char *name, const AVSValue args, const char **arg_names) {
-    if (!qstricmp(name, "Cache") || !qstricmp(name, "InternalCache")) {
+    if (!_stricmp(name, "Cache") || !_stricmp(name, "InternalCache")) {
         return args;
     }
 
-    if (!qstricmp(name, "Crop")) {
-        qWarning(QByteArray("Invoke not fully implemented, tried to call Crop() but I will do nothing"));
+    if (!_stricmp(name, "Crop")) {
+        vsWarning("Invoke not fully implemented, tried to call Crop() but I will do nothing");
         return args[0];
     }
 
-    qWarning(QByteArray("Invoke not fully implemented, tried to call: ") + name + " but I will pretend it doesn't exist");
+    vsWarning("Invoke not fully implemented, tried to call: %s but I will pretend it doesn't exist", name);
     throw IScriptEnvironment::NotFound();
     return AVSValue();
 }
@@ -558,17 +577,17 @@ bool FakeAvisynth::SetGlobalVar(const char *name, const AVSValue &val) {
 }
 
 void FakeAvisynth::PushContext(int level) {
-    qFatal("PushContext not implemented");
+    vsFatal("PushContext not implemented");
 }
 
 void FakeAvisynth::PopContext() {
-    qFatal("PopContext not implemented");
+    vsFatal("PopContext not implemented");
 }
 
 PVideoFrame FakeAvisynth::NewVideoFrame(const VideoInfo &vi, int align) {
     VSFrameRef *ref = NULL;
-    Q_ASSERT(vi.width > 0);
-    Q_ASSERT(vi.height > 0);
+    assert(vi.width > 0);
+    assert(vi.height > 0);
 
     // attempt to copy over the right set of properties, assuming that frame n in is also n out
     const VSFrameRef *propSrc = NULL;
@@ -585,7 +604,7 @@ PVideoFrame FakeAvisynth::NewVideoFrame(const VideoInfo &vi, int align) {
     } else if (vi.IsRGB32()) {
         ref = vsapi->newVideoFrame(vsapi->getFormatPreset(pfCompatBGR32, core), vi.width, vi.height, propSrc, core);
     } else {
-        qFatal("Only YV12, YUY2 and RGB32 supported");
+        vsFatal("Only YV12, YUY2 and RGB32 supported");
     }
 
 
@@ -604,16 +623,16 @@ PVideoFrame FakeAvisynth::NewVideoFrame(const VideoInfo &vi, int align) {
         isYV12 ? vsapi->getWritePtr(ref, 2) - firstPlanePtr : 0,
         isYV12 ? vsapi->getStride(ref, 1) : 0);
     PVideoFrame pvf(vfb);
-    ownedFrames.insert(vfb, ref);
+    ownedFrames.insert(std::make_pair(vfb, ref));
     return pvf;
 }
 
 bool FakeAvisynth::MakeWritable(PVideoFrame *pvf) {
     // Find the backing frame, copy it, wrap the new frame into a avisynth PVideoFrame
     VideoFrame *vfb = (VideoFrame *)(void *)(*pvf);
-    QMap<VideoFrame *, const VSFrameRef *>::Iterator it = ownedFrames.find(vfb);
-    Q_ASSERT(it != ownedFrames.end());
-    VSFrameRef *ref = vsapi->copyFrame(it.value(), core);
+    auto it = ownedFrames.find(vfb);
+    assert(it != ownedFrames.end());
+    VSFrameRef *ref = vsapi->copyFrame(it->second, core);
     uint8_t *firstPlanePtr = vsapi->getWritePtr(ref, 0);
     VideoFrame *newVfb = new VideoFrame(
         // the data will never be modified due to the writable protections embedded in this mess
@@ -627,7 +646,7 @@ bool FakeAvisynth::MakeWritable(PVideoFrame *pvf) {
         vsapi->getWritePtr(ref, 2) - firstPlanePtr,
         vsapi->getStride(ref, 1));
     *pvf = PVideoFrame(newVfb);
-    ownedFrames.insert(newVfb, ref);
+    ownedFrames.insert(std::make_pair(newVfb, ref));
     return true;
 }
 
@@ -654,7 +673,7 @@ void FakeAvisynth::CheckVersion(int version) {
 
 PVideoFrame FakeAvisynth::Subframe(PVideoFrame src, int rel_offset, int new_pitch, int new_row_size, int new_height) {
     if (src->row_size != new_row_size)
-        qFatal("Subframe only partially implemented");
+        vsFatal("Subframe only partially implemented");
     // not pretty at all, but the underlying frame has to be fished out to have any idea what the input really is
     const VSFrameRef *f = avsToVSFrame((VideoFrame *)(void *)src);
     const VSFormat *fi = vsapi->getFrameFormat(f);
@@ -667,7 +686,7 @@ PVideoFrame FakeAvisynth::Subframe(PVideoFrame src, int rel_offset, int new_pitc
     else if (fi->id == pfCompatBGR32)
         vi.pixel_type = VideoInfo::CS_BGR32;
     else
-        qFatal("Bad colorspace");
+        vsFatal("Bad colorspace");
 
     PVideoFrame dst = NewVideoFrame(vi);
     BitBlt(dst->GetWritePtr(), dst->GetPitch(), src->GetReadPtr() + rel_offset, new_pitch, new_row_size, new_height);
@@ -681,23 +700,23 @@ int FakeAvisynth::SetMemoryMax(int mem) {
 }
 
 int FakeAvisynth::SetWorkingDir(const char *newdir) {
-    qFatal("SetWorkingDir not implemented");
+    vsFatal("SetWorkingDir not implemented");
     return 1;
 }
 
 void *FakeAvisynth::ManageCache(int key, void *data) {
-    qFatal("ManageCache not implemented");
+    vsFatal("ManageCache not implemented");
     return NULL;
 }
 
 bool FakeAvisynth::PlanarChromaAlignment(PlanarChromaAlignmentMode key) {
-    qFatal("PlanarChromaAlignment not implemented");
+    vsFatal("PlanarChromaAlignment not implemented");
     return true;
 }
 
 PVideoFrame FakeAvisynth::SubframePlanar(PVideoFrame src, int rel_offset, int new_pitch, int new_row_size, int new_height, int rel_offsetU, int rel_offsetV, int new_pitchUV) {
     if (src->row_size != new_row_size)
-        qFatal("SubframePlanar only partially implemented");
+        vsFatal("SubframePlanar only partially implemented");
     // not pretty at all, but the underlying frame has to be fished out to have any idea what the input really is
     const VSFrameRef *f = avsToVSFrame((VideoFrame *)(void *)src);
     const VSFormat *fi = vsapi->getFrameFormat(f);
@@ -708,7 +727,7 @@ PVideoFrame FakeAvisynth::SubframePlanar(PVideoFrame src, int rel_offset, int ne
     if (fi->id == pfYUV420P8)
         vi.pixel_type = VideoInfo::CS_YV12;
     else
-        qFatal("Bad colorspace");
+        vsFatal("Bad colorspace");
 
     PVideoFrame dst = NewVideoFrame(vi);
 
@@ -720,11 +739,11 @@ PVideoFrame FakeAvisynth::SubframePlanar(PVideoFrame src, int rel_offset, int ne
 
 static void VS_CC avsLoadPlugin(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
     FakeAvisynth *avs = new FakeAvisynth(core, vsapi);
-    QString uStr = QString::fromUtf8(vsapi->propGetData(in, "path", 0, NULL));
-    QVector<wchar_t> wStr;
-    wStr.resize(uStr.length() + 1);
-    uStr.toWCharArray(&wStr[0]);
-    HMODULE plugin = LoadLibraryW(wStr.data());
+    const char *rawPath = vsapi->propGetData(in, "path", 0, NULL);
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> conversion;
+    std::wstring wPath = conversion.from_bytes(rawPath);
+
+    HMODULE plugin = LoadLibraryW(wPath.c_str());
     typedef const char*(__stdcall * AvisynthPluginInitFunc)(IScriptEnvironment * env);
 
     if (!plugin) {
@@ -747,16 +766,18 @@ static void VS_CC avsLoadPlugin(const VSMap *in, VSMap *out, void *userData, VSC
 // This stuff really only works properly on windows, feel free to investigate what the linux ABI thinks about it
 #ifdef VS_TARGET_OS_WINDOWS
     if (!vs_isMMXStateOk())
-        qFatal("Bad mmx state detected after plugin load");
+        vsFatal("Bad MMX state detected after loading %s", rawPath);
     if (!vs_isFPUStateOk())
-        qWarning("Bad fpu state detected after plugin load");
+        vsWarning("Bad FPU state detected after loading %s", rawPath);
+    if (!vs_isSSEStateOk())
+        vsFatal("Bad SSE state detected after loading %s", rawPath);
 #endif
 
     delete avs; // the environment is just temporary to add the functions,
     // a new one will be created for each filter instance
 }
 
-WrappedFunction::WrappedFunction(const QByteArray &name, FakeAvisynth::ApplyFunc apply, const QList<AvisynthArgs> &parsedArgs, void *avsUserData) :
+WrappedFunction::WrappedFunction(const std::string &name, FakeAvisynth::ApplyFunc apply, const std::vector<AvisynthArgs> &parsedArgs, void *avsUserData) :
     name(name), apply(apply), parsedArgs(parsedArgs), avsUserData(avsUserData) {
 }
 

@@ -24,7 +24,7 @@ static const VSFrameRef *VS_CC filterGetFrame(int n, int activationReason, void 
         vsapi->requestFrameFilter(n, d->node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
         const VSFrameRef *frame = vsapi->getFrameFilter(n, d->node, frameCtx);
-  
+
         // your code here...
 
         return frame;
@@ -50,7 +50,6 @@ static void VS_CC filterCreate(const VSMap *in, VSMap *out, void *userData, VSCo
     *data = d;
 
     vsapi->createFilter(in, out, "Filter", filterInit, filterGetFrame, filterFree, fmParallel, 0, data, core);
-    return;
 }
 
 //////////////////////////////////////////

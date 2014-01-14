@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2012 Fredrik Mellbin
+* Copyright (c) 2012-2013 Fredrik Mellbin
 *
 * This file is part of VapourSynth.
 *
@@ -21,10 +21,13 @@
 #ifndef AVISYNTH_COMPAT_H
 #define AVISYNTH_COMPAT_H
 
-#include <functional>
 #include "avisynth_wrapper.h"
 #include "VapourSynth.h"
 #include "VSHelper.h"
+#include <list>
+#include <map>
+#include <vector>
+#include <string>
 
 namespace AvisynthCompat {
 
@@ -34,9 +37,9 @@ class FakeAvisynth : public IScriptEnvironment {
     friend class VSClip;
 private:
     VSCore *core;
-    QList<QByteArray> savedStrings;
+    std::list<std::string> savedStrings;
     const VSAPI *vsapi;
-    QMap<VideoFrame *, const VSFrameRef *> ownedFrames;
+    std::map<VideoFrame *, const VSFrameRef *> ownedFrames;
 public:
     const VSFrameRef *avsToVSFrame(VideoFrame *frame);
 
@@ -81,10 +84,11 @@ private:
     VSNodeRef *clip;
     FakeAvisynth *fakeEnv;
     const VSAPI *vsapi;
+    int numSlowWarnings;
     VideoInfo vi;
 public:
     VSClip(VSNodeRef *clip, int64_t numAudioSamples, int nChannels, FakeAvisynth *fakeEnv, const VSAPI *vsapi)
-        : clip(clip), fakeEnv(fakeEnv), vsapi(vsapi) {
+        : clip(clip), fakeEnv(fakeEnv), vsapi(vsapi), numSlowWarnings(0) {
         const ::VSVideoInfo *srcVi = vsapi->getVideoInfo(clip);
         vi.width = srcVi->width;
         vi.height = srcVi->height;
@@ -132,13 +136,14 @@ struct PrefetchInfo {
 };
 
 struct WrappedClip {
+    std::string filterName;
     PrefetchInfo prefetchInfo;
-    QList<VSNodeRef *> preFetchClips;
+    std::vector<VSNodeRef *> preFetchClips;
     PClip clip;
     FakeAvisynth *fakeEnv;
     int64_t magicalNumAudioSamplesForMVTools;
     int magicalNChannelsForMVTools;
-    WrappedClip(const PClip &clip, const QList<VSNodeRef *> &preFetchClips, const PrefetchInfo &prefetchInfo, FakeAvisynth *fakeEnv);
+    WrappedClip(const std::string &filterName, const PClip &clip, const std::vector<VSNodeRef *> &preFetchClips, const PrefetchInfo &prefetchInfo, FakeAvisynth *fakeEnv);
     ~WrappedClip() {
         clip = NULL;
         delete fakeEnv;
@@ -146,18 +151,18 @@ struct WrappedClip {
 };
 
 struct AvisynthArgs {
-    QByteArray name;
+    std::string name;
     short type;
     bool required;
-    AvisynthArgs(const QByteArray &name, short type, bool required) : name(name), type(type), required(required) { }
+    AvisynthArgs(const std::string &name, short type, bool required) : name(name), type(type), required(required) {}
 };
 
 struct WrappedFunction {
-    QByteArray name;
+    std::string name;
     FakeAvisynth::ApplyFunc apply;
-    QList<AvisynthArgs> parsedArgs;
+    std::vector<AvisynthArgs> parsedArgs;
     void *avsUserData;
-    WrappedFunction(const QByteArray &name, FakeAvisynth::ApplyFunc apply, const QList<AvisynthArgs> &parsedArgs, void *avsUserData);
+    WrappedFunction(const std::string &name, FakeAvisynth::ApplyFunc apply, const std::vector<AvisynthArgs> &parsedArgs, void *avsUserData);
 };
 
 }

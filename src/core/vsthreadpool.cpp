@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2012 Fredrik Mellbin
+* Copyright (c) 2012-2013 Fredrik Mellbin
 *
 * This file is part of VapourSynth.
 *
@@ -19,180 +19,258 @@
 */
 
 #include "vscore.h"
+#include <assert.h>
+#ifdef VS_TARGET_CPU_X86
+#include "x86utils.h"
+#endif
 
-VSThread::VSThread(VSThreadPool *owner) : owner(owner), stop(false) {
+void VSThreadPool::runTasks(VSThreadPool *owner, std::atomic<bool> &stop) {
+#ifdef VS_TARGET_OS_WINDOWS
+    if (!vs_isMMXStateOk())
+        vsFatal("Bad MMX state detected after creating new thread");
+    if (!vs_isFPUStateOk())
+        vsWarning("Bad FPU state detected after creating new thread");
+    if (!vs_isSSEStateOk())
+        vsFatal("Bad SSE state detected after creating new thread");
+#endif
 
-}
-
-void VSThread::stopThread() {
-    stop = true;
-}
-
-void VSThread::run() {
-    owner->lock.lock();
-	owner->activeThreads.ref();
+    std::unique_lock<std::mutex> lock(owner->lock);
+    ++owner->activeThreads;
 
     while (true) {
         bool ranTask = false;
 
-        for (int i = 0; i < owner->tasks.count(); i++) {
-            PFrameContext rCtx = owner->tasks[i];
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Go through all tasks from the top (oldest) and process the first one possible
+        for (std::list<PFrameContext>::iterator iter = owner->tasks.begin(); iter != owner->tasks.end(); ++iter) {
+            FrameContext *mainContext = iter->get();
+            FrameContext *leafContext = NULL;
 
-            if (rCtx->frameDone && rCtx->returnedFrame) {
-                owner->tasks.removeAt(i--);
-                owner->returnFrame(rCtx, rCtx->returnedFrame);
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Handle the output tasks
+            if (mainContext->frameDone && mainContext->returnedFrame) {
+                PFrameContext mainContextRef(*iter);
+                owner->tasks.erase(iter);
+                owner->returnFrame(mainContextRef, mainContext->returnedFrame);
                 ranTask = true;
-                break;
-            } else {
-
-                PFrameContext pCtx = rCtx;
-
-                if (rCtx->returnedFrame || rCtx->hasError())
-                    rCtx = rCtx->upstreamContext;
-
-                Q_ASSERT(rCtx);
-                Q_ASSERT(pCtx);
-
-                // if an error has already been flagged upstream simply drop this task so a filter won't get multiple arError calls for the same frame
-                if (rCtx->hasError()) {
-                    owner->tasks.removeAt(i--);
-                    continue;
-                }
-
-                bool isSingleInstance = (rCtx->clip->filterMode == fmParallelRequests && pCtx->returnedFrame && rCtx->numFrameRequests == 1 && pCtx != rCtx) || rCtx->clip->filterMode == fmSerial;
-
-                // this check is common for both filter modes, it makes sure that multiple calls won't be made in parallel to a single filter to produce the same frame
-                // special casing so serial unordered doesn't need yet another list
-                if (owner->runningTasks.contains(FrameKey(rCtx->clip, rCtx->clip->filterMode == fmUnordered ? -1 : rCtx->n)))
-                    continue;
-
-                if (isSingleInstance) {
-                    // this is the complicated case, a new frame may not be started until all calls are completed for the current one
-                    if (owner->framesInProgress.contains(rCtx->clip) && owner->framesInProgress[rCtx->clip] != rCtx->n)
-                        continue;
-                }
-
-                // mark task as active
-                owner->tasks.removeAt(i--);
-                owner->runningTasks.insert(FrameKey(rCtx->clip, rCtx->clip->filterMode == fmUnordered ? -1 : rCtx->n), rCtx);
-
-                if (isSingleInstance)
-                    owner->framesInProgress.insert(rCtx->clip, rCtx->n);
-
-                ActivationReason ar = arInitial;
-
-                if (pCtx->hasError()) {
-                    ar = arError;
-                    rCtx->setError(pCtx->getErrorMessage());
-                } else if (pCtx != rCtx && pCtx->returnedFrame) {
-                    if (--rCtx->numFrameRequests)
-                        ar = arFrameReady;
-                    else
-                        ar = arAllFramesReady;
-
-                    Q_ASSERT(rCtx->numFrameRequests >= 0);
-                    rCtx->availableFrames.insert(NodeOutputKey(pCtx->clip, pCtx->n, pCtx->index), pCtx->returnedFrame);
-                    rCtx->lastCompletedN = pCtx->n;
-                    rCtx->lastCompletedNode = pCtx->node;
-                }
-
-                owner->lock.unlock();
-                // run task
-
-                PVideoFrame f = rCtx->clip->getFrameInternal(rCtx->n, ar, rCtx);
-                ranTask = true;
-                owner->lock.lock();
-
-                if (f && rCtx->numFrameRequests > 0)
-					qFatal("Frame returned but there are still pending frame requests, filter: %s", rCtx->clip->name.constData());
-
-                owner->runningTasks.remove(FrameKey(rCtx->clip, rCtx->clip->filterMode == fmUnordered ? -1 : rCtx->n));
-
-                if (f || ar == arError || rCtx->hasError()) {
-                    // free all input frames quickly since the frame processing is done
-                    rCtx->availableFrames.clear();
-
-                    if (isSingleInstance) {
-                        if (owner->framesInProgress[rCtx->clip] != rCtx->n && !rCtx->hasError())
-                            qWarning("Releasing unobtained frame lock");
-
-                        owner->framesInProgress.remove(rCtx->clip);
-                    }
-
-                    owner->allContexts.remove(NodeOutputKey(rCtx->clip, rCtx->n, rCtx->index));
-                }
-
-                if (rCtx->hasError()) {
-                    PFrameContext n;
-
-                    do {
-                        n = rCtx->notificationChain;
-
-                        if (n) {
-                            rCtx->notificationChain.clear();
-                            n->setError(rCtx->getErrorMessage());
-                        }
-
-                        if (rCtx->upstreamContext) {
-                            owner->startInternal(rCtx);
-                        }
-
-                        if (rCtx->frameDone) {
-                            owner->lock.unlock();
-                            QMutexLocker callbackLock(&owner->callbackLock);
-                            rCtx->frameDone(rCtx->userData, NULL, rCtx->n, rCtx->node, rCtx->getErrorMessage().constData());
-                            callbackLock.unlock();
-                            owner->lock.lock();
-                        }
-                    } while ((rCtx = n));
-                } else if (f) {
-                    Q_ASSERT(rCtx->numFrameRequests == 0);
-                    PFrameContext n;
-
-                    do {
-                        n = rCtx->notificationChain;
-
-                        if (n)
-                            rCtx->notificationChain.clear();
-
-                        if (rCtx->upstreamContext) {
-                            rCtx->returnedFrame = f;
-                            owner->startInternal(rCtx);
-                        }
-
-                        if (rCtx->frameDone)
-                            owner->returnFrame(rCtx, f);
-                    } while ((rCtx = n));
-                } else if (rCtx->numFrameRequests > 0 || rCtx->n < 0) {
-                    // already scheduled or in the case of negative n it is simply a cache notify message
-                } else {
-					qFatal("No frame returned at the end of processing by %s", rCtx->clip->name.constData());
-                }
-
                 break;
             }
+
+            if (mainContext->frameDone && mainContext->hasError()) {
+                PFrameContext mainContextRef(*iter);
+                owner->tasks.erase(iter);
+                owner->returnFrame(mainContextRef, mainContext->getErrorMessage());
+                ranTask = true;
+                break;
+            }
+
+            bool hasLeafContext = mainContext->returnedFrame || mainContext->hasError();
+            if (hasLeafContext)
+            {
+                leafContext = mainContext;
+                mainContext = mainContext->upstreamContext.get();
+            }
+
+            VSNode *clip = mainContext->clip;
+            int filterMode = clip->filterMode;
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// This part handles the locking for the different filter modes
+
+            bool parallelRequestsNeedsUnlock = false;
+            if (filterMode == fmUnordered) {
+                // already busy?
+                if (!clip->serialMutex.try_lock())
+                    continue;
+            } else if (filterMode == fmSerial) {
+                // already busy?
+                if (!clip->serialMutex.try_lock())
+                    continue;
+                // no frame in progress?
+                if (clip->serialFrame == -1) {
+                    clip->serialFrame = mainContext->n;
+                //
+                } else if (clip->serialFrame != mainContext->n) {
+                    clip->serialMutex.unlock();
+                    continue;
+                }
+                // continue processing the already started frame
+            } else if (filterMode == fmParallel) {
+                std::lock_guard<std::mutex> lock(clip->concurrentFramesMutex);
+                // is the filter already processing another call for this frame? if so move along
+                if (clip->concurrentFrames.count(mainContext->n)) {
+                    continue;
+                } else {
+                    clip->concurrentFrames.insert(mainContext->n);
+                }
+            } else if (filterMode == fmParallelRequests) {
+                std::lock_guard<std::mutex> lock(clip->concurrentFramesMutex);
+                // is the filter already processing another call for this frame? if so move along
+                if (clip->concurrentFrames.count(mainContext->n)) {
+                    continue;
+                } else {
+                    // do we need the serial lock since all frames will be ready this time?
+                    // check if we're in the arAllFramesReady state so we need additional locking
+                    if (mainContext->numFrameRequests == 1) {
+                        if (!clip->serialMutex.try_lock())
+                            continue;
+                        parallelRequestsNeedsUnlock = true;
+                        clip->concurrentFrames.insert(mainContext->n);
+                    }
+                }
+            }
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Remove the context from the task list
+
+            PFrameContext mainContextRef;
+            PFrameContext leafContextRef;
+            if (hasLeafContext) {
+                leafContextRef = *iter;
+                mainContextRef = leafContextRef->upstreamContext;
+            } else {
+                mainContextRef = *iter;
+            }
+
+            owner->tasks.erase(iter);
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Figure out the activation reason
+
+            VSActivationReason ar = arInitial;
+            if (hasLeafContext && leafContext->hasError()) {
+                ar = arError;
+                mainContext->setError(leafContext->getErrorMessage());
+            } else if (hasLeafContext && leafContext->returnedFrame) {
+                if (--mainContext->numFrameRequests > 0)
+                    ar = arFrameReady;
+                else
+                    ar = arAllFramesReady;
+
+                assert(mainContext->numFrameRequests >= 0);
+                mainContext->availableFrames.insert(std::make_pair(NodeOutputKey(leafContext->clip, leafContext->n, leafContext->index), leafContext->returnedFrame));
+                mainContext->lastCompletedN = leafContext->n;
+                mainContext->lastCompletedNode = leafContext->node;
+            }
+
+            bool hasExistingRequests = !!mainContext->numFrameRequests;
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Do the actual processing
+
+            lock.unlock();
+
+            VSFrameContext externalFrameCtx(mainContextRef);
+            PVideoFrame f(clip->getFrameInternal(mainContext->n, ar, externalFrameCtx));
+            ranTask = true;
+            bool frameProcessingDone = f || mainContext->hasError();
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Unlock so the next job can run on the context
+            if (filterMode == fmUnordered) {
+                clip->serialMutex.unlock();
+            } else if (filterMode == fmSerial) {
+                if (frameProcessingDone)
+                    clip->serialFrame = -1;
+                clip->serialMutex.unlock();
+            } else if (filterMode == fmParallel) {
+                std::lock_guard<std::mutex> lock(clip->concurrentFramesMutex);
+                clip->concurrentFrames.erase(mainContext->n);
+            } else if (filterMode == fmParallelRequests) {
+                std::lock_guard<std::mutex> lock(clip->concurrentFramesMutex);
+                clip->concurrentFrames.erase(mainContext->n);
+                if (parallelRequestsNeedsUnlock)
+                    clip->serialMutex.unlock();
+            }
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Handle frames that were requested
+            bool requestedFrames = !externalFrameCtx.reqList.empty();
+
+            lock.lock();
+
+            if (requestedFrames) {
+                for (auto &reqIter : externalFrameCtx.reqList)
+                    owner->startInternal(reqIter);
+                externalFrameCtx.reqList.clear();
+            }
+
+            if (frameProcessingDone)
+                owner->allContexts.erase(NodeOutputKey(mainContext->clip, mainContext->n, mainContext->index));
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Propagate status to other linked contexts
+// CHANGES mainContextRef!!!
+
+            if (mainContext->hasError()) {
+                PFrameContext n;
+                do {
+                    n = mainContextRef->notificationChain;
+
+                    if (n) {
+                        mainContextRef->notificationChain.reset();
+                        n->setError(mainContextRef->getErrorMessage());
+                    }
+
+                    if (mainContextRef->upstreamContext) {
+                        owner->startInternal(mainContextRef);
+                    }
+
+                    if (mainContextRef->frameDone) {
+                        owner->returnFrame(mainContextRef, mainContextRef->getErrorMessage());
+                    }
+                } while ((mainContextRef = n));
+            } else if (f) {
+                if (hasExistingRequests || requestedFrames)
+                    vsFatal("A frame was returned at the end of processing by %s but there are still outstanding requests", clip->name.c_str());
+                PFrameContext n;
+
+                do {
+                    n = mainContextRef->notificationChain;
+
+                    if (n)
+                        mainContextRef->notificationChain.reset();
+
+                    if (mainContextRef->upstreamContext) {
+                        mainContextRef->returnedFrame = f;
+                        owner->startInternal(mainContextRef);
+                    }
+
+                    if (mainContextRef->frameDone)
+                        owner->returnFrame(mainContextRef, f);
+                } while ((mainContextRef = n));
+            } else if (hasExistingRequests || requestedFrames) {
+                // already scheduled, do nothing
+            } else {
+                vsFatal("No frame returned at the end of processing by %s", clip->name.c_str());
+            }
+            break;
         }
+
 
         if ((!ranTask && !stop) || (owner->activeThreadCount() > owner->threadCount())) {
-			owner->activeThreads.deref();
-			owner->idleThreads++;
-            owner->newWork.wait(&owner->lock);
-			owner->idleThreads--;
-			owner->activeThreads.ref();
+            --owner->activeThreads;
+            ++owner->idleThreads;
+            owner->newWork.wait(lock);
+            --owner->idleThreads;
+            ++owner->activeThreads;
         }
 
-		if (stop) {
-			owner->idleThreads--;
-			owner->activeThreads.deref();
-            owner->lock.unlock();
+        if (stop) {
+            --owner->idleThreads;
+            ++owner->activeThreads;
+            lock.unlock();
             return;
         }
     }
 }
 
-VSThreadPool::VSThreadPool(VSCore *core, int threads) : core(core), activeThreads(0), idleThreads(0) {
-	maxThreads = threads > 0 ? threads : QThread::idealThreadCount();
-	QMutexLocker m(&lock);
+VSThreadPool::VSThreadPool(VSCore *core, int threads) : core(core), activeThreads(0), idleThreads(0), stopThreads(false) {
+    maxThreads = threads > 0 ? threads : std::thread::hardware_concurrency();
+    if (maxThreads == 0) {
+        maxThreads = 1;
+        vsWarning("Couldn't detect optimal number of threads. Thread count set to 1.");
+    }
 }
 
 int VSThreadPool::activeThreadCount() const {
@@ -204,51 +282,62 @@ int VSThreadPool::threadCount() const {
 }
 
 void VSThreadPool::spawnThread() {
-    VSThread *vst = new VSThread(this);
-    allThreads.insert(vst);
-    vst->start();
+    std::thread *thread = new std::thread(runTasks, this, std::ref(stopThreads));
+    allThreads.insert(std::make_pair(thread->get_id(), thread));
 }
 
 void VSThreadPool::setThreadCount(int threads) {
-	maxThreads = threads;
+    maxThreads = threads;
 }
 
 void VSThreadPool::wakeThread() {
-	if (activeThreads < maxThreads && idleThreads == 0)
-		spawnThread();
+    if (activeThreads < maxThreads && idleThreads == 0)
+        spawnThread();
 
     if (activeThreads < maxThreads)
-        newWork.wakeOne();
+        newWork.notify_one();
 }
 
 void VSThreadPool::releaseThread() {
-	activeThreads.deref();
+    --activeThreads;
 }
 
 void VSThreadPool::reserveThread() {
-    activeThreads.ref();
+    ++activeThreads;
 }
 
-void VSThreadPool::notifyCaches(CacheActivation reason) {
-    for (int i = 0; i < core->caches.count(); i++)
-        tasks.insert(0, PFrameContext(new FrameContext(reason, 0, core->caches[i], PFrameContext())));
+void VSThreadPool::notifyCaches(bool needMemory) {
+    std::lock_guard<std::mutex> lock(core->cacheLock);
+    for (auto &cache : core->caches)
+        cache->notifyCache(needMemory);
 }
 
 void VSThreadPool::start(const PFrameContext &context) {
-    Q_ASSERT(context);
-    QMutexLocker m(&lock);
-	startInternal(context);
+    assert(context);
+    std::lock_guard<std::mutex> l(lock);
+    startInternal(context);
 }
 
 void VSThreadPool::returnFrame(const PFrameContext &rCtx, const PVideoFrame &f) {
-    Q_ASSERT(rCtx->frameDone);
+    assert(rCtx->frameDone);
     // we need to unlock here so the callback may request more frames without causing a deadlock
     // AND so that slow callbacks will only block operations in this thread, not all the others
     lock.unlock();
     VSFrameRef *ref = new VSFrameRef(f);
-    QMutexLocker m(&callbackLock);
+    callbackLock.lock();
     rCtx->frameDone(rCtx->userData, ref, rCtx->n, rCtx->node, NULL);
-    m.unlock();
+    callbackLock.unlock();
+    lock.lock();
+}
+
+void VSThreadPool::returnFrame(const PFrameContext &rCtx, const std::string &errMsg) {
+    assert(rCtx->frameDone);
+    // we need to unlock here so the callback may request more frames without causing a deadlock
+    // AND so that slow callbacks will only block operations in this thread, not all the others
+    lock.unlock();
+    callbackLock.lock();
+    rCtx->frameDone(rCtx->userData, NULL, rCtx->n, rCtx->node, errMsg.c_str());
+    callbackLock.unlock();
     lock.lock();
 }
 
@@ -257,12 +346,12 @@ void VSThreadPool::startInternal(const PFrameContext &context) {
     //unfortunately this would probably be quite slow for deep scripts so just hope the cache catches it
 
     if (context->n < 0)
-		qFatal("Negative frame request by: %s", context->clip->getName().constData());
+        vsFatal("Negative frame request by: %s", context->clip->getName().c_str());
 
     // check to see if it's time to reevaluate cache sizes
     if (core->memory->isOverLimit()) {
         ticks = 0;
-        notifyCaches(cNeedMemory);
+        notifyCaches(true);
     }
 
 #if VS_FEATURE_CUDA
@@ -275,101 +364,64 @@ void VSThreadPool::startInternal(const PFrameContext &context) {
 #endif
 
     // a normal tick for caches to adjust their sizes based on recent history
-    if (!context->upstreamContext && ticks.fetchAndAddAcquire(1) == 99) {
+    if (!context->upstreamContext && ++ticks == 500) {
         ticks = 0;
-        notifyCaches(cCacheTick);
+        notifyCaches(false);
     }
 
-    // add it immediately if the task is to return a completed frame
-    if (context->returnedFrame) {
-        tasks.append(context);
-        wakeThread();
-        return;
+    // add it immediately if the task is to return a completed frame or report an error since it never has an existing context
+    if (context->returnedFrame || context->hasError()) {
+        tasks.push_back(context);
     } else {
         if (context->upstreamContext)
-            context->upstreamContext->numFrameRequests++;
-
-        ////////////////////////
-        // see if the task is a duplicate
-        foreach(const PFrameContext &ctx, tasks) {
-            if (context->clip == ctx->clip && context->n == ctx->n && context->index == ctx->index) {
-                if (ctx->returnedFrame) {
-                    // special case where the requested frame is encountered "by accident"
-                    context->returnedFrame = ctx->returnedFrame;
-                    tasks.append(context);
-                    wakeThread();
-                    return;
-                } else {
-                    PFrameContext rCtx = ctx;
-
-                    if (rCtx->returnedFrame)
-                        rCtx = rCtx->upstreamContext;
-
-                    if (context->clip == rCtx->clip && context->n == rCtx->n && context->index == ctx->index) {
-                        PFrameContext t = rCtx;
-
-                        while (t && t->notificationChain)
-                            t = t->notificationChain;
-
-                        t->notificationChain = context;
-                        return;
-                    }
-                }
-            }
-        }
+            ++context->upstreamContext->numFrameRequests;
 
         NodeOutputKey p(context->clip, context->n, context->index);
 
-        if (allContexts.contains(p)) {
-            PFrameContext ctx = allContexts[p];
-            Q_ASSERT(ctx);
-            Q_ASSERT(context->clip == ctx->clip && context->n == ctx->n);
+        if (allContexts.count(p)) {
+            PFrameContext &ctx = allContexts[p];
+            assert(context->clip == ctx->clip && context->n == ctx->n && context->index == ctx->index);
 
             if (ctx->returnedFrame) {
                 // special case where the requested frame is encountered "by accident"
                 context->returnedFrame = ctx->returnedFrame;
-                tasks.append(context);
-                wakeThread();
-                return;
+                tasks.push_back(context);
             } else {
-                while (ctx->notificationChain)
-                    ctx = ctx->notificationChain;
+                // add it to the list of contexts to notify when it's available
+                context->notificationChain = ctx->notificationChain;
                 ctx->notificationChain = context;
-                return;
             }
         } else {
+            // create a new context and append it to the tasks
             allContexts[p] = context;
+            tasks.push_back(context);
         }
-
-        tasks.append(context);
-        wakeThread();
-        return;
     }
-
+    wakeThread();
 }
 
 bool VSThreadPool::isWorkerThread() {
-	QMutexLocker m(&lock);
-	return allThreads.contains((VSThread *)QThread::currentThread());
+    std::lock_guard<std::mutex> m(lock);
+    return allThreads.count(std::this_thread::get_id()) > 0;
 }
 
 void VSThreadPool::waitForDone() {
-	// todo
+    // todo
 }
 
 VSThreadPool::~VSThreadPool() {
-	QMutexLocker m(&lock);
+    std::unique_lock<std::mutex> m(lock);
+    stopThreads = true;
 
-	// fixme, hangs on free
-    while (allThreads.count()) {
-        VSThread *t = *allThreads.begin();
-        t->stopThread();
-        newWork.wakeAll();
+    while (!allThreads.empty()) {
+        auto iter = allThreads.begin();
+        auto thread = iter->second;
+        newWork.notify_all();
         m.unlock();
-        t->wait();
-        m.relock();
-        allThreads.remove(t);
-        delete t;
-        newWork.wakeAll();
+        thread->join();
+        m.lock();
+        allThreads.erase(iter);
+        delete thread;
+        newWork.notify_all();
     }
 };

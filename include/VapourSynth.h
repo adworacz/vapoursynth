@@ -27,30 +27,30 @@
 
 // Convenience for C++ users.
 #ifdef __cplusplus
-#	define VS_EXTERN_C extern "C"
+#    define VS_EXTERN_C extern "C"
 #else
-#	define VS_EXTERN_C
+#    define VS_EXTERN_C
 #endif
 
-#ifdef _WIN32
-#	define VS_CC __stdcall
+#if defined(_WIN32) && !defined(_WIN64)
+#    define VS_CC __stdcall
 #else
-#	define VS_CC
+#    define VS_CC
 #endif
 
 // And now for some symbol hide-and-seek...
 #if defined(_WIN32) // Windows being special
-#	define VS_EXTERNAL_API(ret) VS_EXTERN_C __declspec(dllexport) ret VS_CC
+#    define VS_EXTERNAL_API(ret) VS_EXTERN_C __declspec(dllexport) ret VS_CC
 #elif defined(__GNUC__) && __GNUC__ >= 4
-#	define VS_EXTERNAL_API(ret) VS_EXTERN_C __attribute__((visibility("default"))) ret VS_CC
+#    define VS_EXTERNAL_API(ret) VS_EXTERN_C __attribute__((visibility("default"))) ret VS_CC
 #else
-#	define VS_EXTERNAL_API(ret) VS_EXTERN_C ret VS_CC
+#    define VS_EXTERNAL_API(ret) VS_EXTERN_C ret VS_CC
 #endif
 
 #if !defined(VS_CORE_EXPORTS) && defined(_WIN32)
-#	define VS_API(ret) VS_EXTERN_C __declspec(dllimport) ret VS_CC
+#    define VS_API(ret) VS_EXTERN_C __declspec(dllimport) ret VS_CC
 #else
-#	define VS_API(ret) VS_EXTERNAL_API(ret)
+#    define VS_API(ret) VS_EXTERNAL_API(ret)
 #endif
 
 typedef struct VSFrameRef VSFrameRef;
@@ -150,20 +150,30 @@ typedef struct VSFormat {
 } VSFormat;
 
 typedef enum VSNodeFlags {
-    nfNoCache = 1,
-} NodeFlags;
+    nfNoCache = 1
+} VSNodeFlags;
+
+typedef enum VSPropTypes {
+    ptUnset = 'u',
+    ptInt = 'i',
+    ptFloat = 'f',
+    ptData = 's',
+    ptNode = 'c',
+    ptFrame = 'v',
+    ptFunction = 'm'
+} VSPropTypes;
 
 typedef enum VSGetPropErrors {
     peUnset = 1,
     peType  = 2,
     peIndex = 4
-} GetPropErrors;
+} VSGetPropErrors;
 
 typedef enum VSPropAppendMode {
     paReplace = 0,
     paAppend  = 1,
     paTouch   = 2
-} PropAppendMode;
+} VSPropAppendMode;
 
 typedef struct VSCoreInfo {
     const char *versionString;
@@ -189,13 +199,13 @@ typedef enum VSActivationReason {
     arFrameReady = 1,
     arAllFramesReady = 2,
     arError = -1
-} ActivationReason;
+} VSActivationReason;
 
 typedef enum VSMessageType {
     mtDebug = 0,
-    mtWarnin = 1,
+    mtWarning = 1,
     mtCritical = 2,
-    mtFatal
+    mtFatal = 3
 } VSMessageType;
 
 typedef enum FrameLocation { flLocal = 0, flGPU = 1 } FrameLocation;
@@ -206,8 +216,8 @@ typedef enum FrameTransferDirection {
 } FrameTransferDirection;
 
 // core function typedefs
-typedef	VSCore *(VS_CC *VSCreateCore)(int threads);
-typedef	void (VS_CC *VSFreeCore)(VSCore *core);
+typedef    VSCore *(VS_CC *VSCreateCore)(int threads);
+typedef    void (VS_CC *VSFreeCore)(VSCore *core);
 typedef const VSCoreInfo *(VS_CC *VSGetCoreInfo)(VSCore *core);
 
 // function/filter typedefs
@@ -294,8 +304,8 @@ typedef int (VS_CC *VSPropSetFunc)(VSMap *map, const char *key, VSFuncRef *func,
 typedef void (VS_CC *VSConfigPlugin)(const char *identifier, const char *defaultNamespace, const char *name, int apiVersion, int readonly, VSPlugin *plugin);
 typedef void (VS_CC *VSInitPlugin)(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin);
 
-typedef VSPlugin *(VS_CC *VSGetPluginId)(const char *identifier, VSCore *core);
-typedef VSPlugin *(VS_CC *VSGetPluginNs)(const char *ns, VSCore *core);
+typedef VSPlugin *(VS_CC *VSGetPluginById)(const char *identifier, VSCore *core);
+typedef VSPlugin *(VS_CC *VSGetPluginByNs)(const char *ns, VSCore *core);
 
 typedef VSMap *(VS_CC *VSGetPlugins)(VSCore *core);
 typedef VSMap *(VS_CC *VSGetFunctions)(VSPlugin *plugin);
@@ -308,8 +318,8 @@ typedef void (VS_CC *VSReleaseFrameEarly)(VSNodeRef *node, int n, VSFrameContext
 
 typedef int64_t (VS_CC *VSSetMaxCacheSize)(int64_t bytes, VSCore *core);
 
-typedef void (VS_CC *VSMessageHandler)(int msgType, const char *msg);
-typedef void (VS_CC *VSSetMessageHandler)(VSMessageHandler handler);
+typedef void (VS_CC *VSMessageHandler)(int msgType, const char *msg, void *userData);
+typedef void (VS_CC *VSSetMessageHandler)(VSMessageHandler handler, void *userData);
 
 struct VSAPI {
     VSCreateCore createCore;
@@ -329,11 +339,11 @@ struct VSAPI {
     VSCopyFrameProps copyFrameProps;
 
     VSRegisterFunction registerFunction;
-    VSGetPluginId getPluginId;
-    VSGetPluginNs getPluginNs;
+    VSGetPluginById getPluginById;
+    VSGetPluginByNs getPluginByNs;
     VSGetPlugins getPlugins;
     VSGetFunctions getFunctions;
-    VSCreateFilter createFilter; // do never use inside a filter's getframe function
+    VSCreateFilter createFilter;
     VSSetError setError; // use to signal errors outside filter getframe functions
     VSGetError getError; // use to query errors, returns 0 if no error
     VSSetFilterError setFilterError; // use to signal errors in the filter getframe function

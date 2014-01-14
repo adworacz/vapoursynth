@@ -2,6 +2,7 @@
 //
 // VapourSynth modifications Copyright 2012-2013 Fredrik Mellbin
 //
+// Original code from:
 // Avisynth v2.5.  Copyright 2008 Ben Rudiak-Gould et al.
 // http://www.avisynth.org
 
@@ -19,23 +20,6 @@
 // along with this program; if not, write to the Free Software
 // Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA, or visit
 // http://www.gnu.org/copyleft/gpl.html .
-//
-// Linking Avisynth statically or dynamically with other modules is making a
-// combined work based on Avisynth.  Thus, the terms and conditions of the GNU
-// General Public License cover the whole combination.
-//
-// As a special exception, the copyright holders of Avisynth give you
-// permission to link Avisynth with independent modules that communicate with
-// Avisynth solely through the interfaces defined in avisynth.h, regardless of the license
-// terms of these independent modules, and to copy and distribute the
-// resulting combined work under terms of your choice, provided that
-// every copy of the combined work is accompanied by a complete copy of
-// the source code of Avisynth (the version of Avisynth used to produce the
-// combined work), being distributed under the terms of the GNU General
-// Public License plus this exception.  An independent module is a module
-// which is not derived from or based on Avisynth, such as 3rd-party filters,
-// import and export plugins, or graphical user interfaces.
-
 
 #include "vsfsincludes.h"
 #include <fstream>
@@ -56,12 +40,12 @@ class VapourSynther:
 
     //  TRCHANNEL trace;
 
-	int num_threads;
-	const VSAPI *vsapi;
-	VSScript *se;
-	bool enable_v210;
-	bool pad_scanlines;
-	VSNodeRef *node;
+    int num_threads;
+    const VSAPI *vsapi;
+    VSScript *se;
+    bool enable_v210;
+    bool pad_scanlines;
+    VSNodeRef *node;
 
     wchar_t *errText;
 
@@ -145,6 +129,8 @@ std::string get_file_contents(const char *filename)
   {
     std::string contents;
     in.seekg(0, std::ios::end);
+    if (in.tellg() > 16 * 1024 * 1014)
+        return "";
     contents.resize(in.tellg());
     in.seekg(0, std::ios::beg);
     in.read(&contents[0], contents.size());
@@ -158,20 +144,20 @@ std::string get_file_contents(const char *filename)
 int/*error*/ VapourSynther::Import(const wchar_t* wszScriptName)
 {
     char szScriptName[MAX_PATH*2];
-    WideCharToMultiByte(CP_UTF8, 0, wszScriptName, -1, szScriptName, sizeof(szScriptName), NULL, NULL); 
+    WideCharToMultiByte(CP_UTF8, 0, wszScriptName, -1, szScriptName, sizeof(szScriptName), NULL, NULL);
     if(*szScriptName)
     {
 
-		std::string script = get_file_contents(szScriptName);
-		if (script.empty())
-			goto vpyerror;
+        std::string script = get_file_contents(szScriptName);
+        if (script.empty())
+            goto vpyerror;
 
-		if (!vseval_evaluateScript(&se, script.c_str(), szScriptName)) {
-			
-			node = vseval_getOutput(se, 0);
-			if (!node)
-				goto vpyerror;
-			vi = vsapi->getVideoInfo(node);
+        if (!vsscript_evaluateScript(&se, script.c_str(), szScriptName, efSetWorkingDir)) {
+
+            node = vsscript_getOutput(se, 0);
+            if (!node)
+                goto vpyerror;
+            vi = vsapi->getVideoInfo(node);
 
             if (vi->width == 0 || vi->height == 0 || vi->format == NULL || vi->numFrames == 0) {
                 setError("Cannot open clips with varying dimensions or format in VSFS");
@@ -198,26 +184,26 @@ int/*error*/ VapourSynther::Import(const wchar_t* wszScriptName)
                     return ERROR_ACCESS_DENIED;
             }
 
-			// set the special options hidden in global variables
-			int error;
-			int64_t val;
-			VSMap *options = vsapi->createMap();
-			vseval_getVariable(se, "enable_v210", options);
-			val = vsapi->propGetInt(options, "enable_v210", 0, &error);
-			if (!error)
-				enable_v210 = !!val;
-			else
-				enable_v210 = false;
-			vseval_getVariable(se, "pad_scanlines", options);
-			val = vsapi->propGetInt(options, "pad_scanlines", 0, &error);
-			if (!error)
-				pad_scanlines = !!val;
-			else
-				pad_scanlines = false;
-			vsapi->freeMap(options);
+            // set the special options hidden in global variables
+            int error;
+            int64_t val;
+            VSMap *options = vsapi->createMap();
+            vsscript_getVariable(se, "enable_v210", options);
+            val = vsapi->propGetInt(options, "enable_v210", 0, &error);
+            if (!error)
+                enable_v210 = !!val;
+            else
+                enable_v210 = false;
+            vsscript_getVariable(se, "pad_scanlines", options);
+            val = vsapi->propGetInt(options, "pad_scanlines", 0, &error);
+            if (!error)
+                pad_scanlines = !!val;
+            else
+                pad_scanlines = false;
+            vsapi->freeMap(options);
 
-			const VSCoreInfo *info = vsapi->getCoreInfo(vseval_getCore(se));
-			num_threads = info->numThreads;
+            const VSCoreInfo *info = vsapi->getCoreInfo(vsscript_getCore(se));
+            num_threads = info->numThreads;
 
             if (vi->format->id == pfYUV422P10 && enable_v210) {
                 packedPlane1 = new uint16_t[ImageSize()];
@@ -230,11 +216,11 @@ int/*error*/ VapourSynther::Import(const wchar_t* wszScriptName)
 
             return 0;
         } else {
-			vpyerror:
-            setError(vseval_getError(se));
-			return ERROR_ACCESS_DENIED;
+            vpyerror:
+            setError(vsscript_getError(se));
+            return ERROR_ACCESS_DENIED;
         }
-    } 
+    }
     return ERROR_ACCESS_DENIED;
 }
 
@@ -247,7 +233,7 @@ void VapourSynther::reportFormat(AvfsLog_* log)
 
     int msLen = (int)(1000.0 * vi->numFrames * vi->fpsDen / vi->fpsNum);
     log->Printf(L"  Duration: %8d frames, %02d:%02d:%02d.%03d\n", vi->numFrames,
-        (msLen/(60*60*1000)), (msLen/(60*1000))%60 ,(msLen/1000)%60, msLen%1000); 
+        (msLen/(60*60*1000)), (msLen/(60*1000))%60 ,(msLen/1000)%60, msLen%1000);
     log->Printf(L"  ColorSpace: %hs\n", vi->format->name);
 
     log->Printf(L"  Width:%4d pixels, Height:%4d pixels.\n", vi->width, vi->height);
@@ -446,7 +432,7 @@ void VapourSynther::setError(const char *_text, const wchar_t *alt) {
     __except (EXCEPTION_EXECUTE_HANDLER) {
         text[i] = '\0';
         //    trace->printf("setError: Trap accessing 0x%08X current contents :-\n%s\n",
-        //	              _text, text);
+        //                  _text, text);
         if (alt) {
             errText = ssdup(alt);
         }
@@ -478,7 +464,7 @@ int/*error*/ VapourSynther::newEnv()
     if (vi) {
         vsapi->freeNode(node);
         node = NULL;
-        vseval_freeScript(se);
+        vsscript_freeScript(se);
         se = NULL;
         delete [] packedPlane1;
         delete [] packedPlane2;
@@ -494,11 +480,11 @@ int/*error*/ VapourSynther::newEnv()
 VapourSynther::VapourSynther(void) :
 references(1),
 
-	num_threads(1),
-	se(NULL),
-	enable_v210(false),
-	pad_scanlines(false),
-	node(NULL),
+    num_threads(1),
+    se(NULL),
+    enable_v210(false),
+    pad_scanlines(false),
+    node(NULL),
 
     //  trace(tropen(L"AVFS")),
     vi(0),
@@ -510,7 +496,7 @@ references(1),
     packedPlane2(0),
     pending_requests(0)
 {
-	vsapi = vseval_getVSApi();
+    vsapi = vsscript_getVSApi();
 }
 
 /*---------------------------------------------------------
@@ -523,12 +509,12 @@ VapourSynther::~VapourSynther(void)
     while (pending_requests > 0);
     delete [] packedPlane1;
     delete [] packedPlane2;
-	if (se) {
-		if (vsapi)
-			vsapi->freeFrame(lastFrame);
-		vseval_freeScript(se);
-		se = NULL;
-	}
+    if (se) {
+        if (vsapi)
+            vsapi->freeFrame(lastFrame);
+        vsscript_freeScript(se);
+        se = NULL;
+    }
     ssfree(lastStringValue);
     ssfree(errText);
 }
@@ -629,10 +615,10 @@ int VapourSynther::ImageSize() {
 
 BOOL APIENTRY DllMain(HANDLE hModule, ULONG ulReason, LPVOID lpReserved) {
     if (ulReason == DLL_PROCESS_ATTACH) {
-		// fixme, move this where threading can't be an issue
-		vseval_init();
+        // fixme, move this where threading can't be an issue
+        vsscript_init();
     } else if (ulReason == DLL_PROCESS_DETACH) {
-        vseval_finalize();
+        vsscript_finalize();
     }
     return TRUE;
 }
