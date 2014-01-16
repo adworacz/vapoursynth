@@ -143,14 +143,15 @@ static __global__ void blankClipKernel(uint8_t *dstp, int stride, int width, int
     ((uint32_t *)dstp)[stride * row + column] = dst_data;
 }
 
-VS_EXTERN_C void VS_CC blankClipProcessCUDA(void *color, const BlankClipData *d, VSCore *core, const VSAPI *vsapi) {
+VS_EXTERN_C void VS_CC blankClipProcessCUDA(const BlankClipData *d, VSCore *core, const VSAPI *vsapi) {
     int blockSize = VSCUDAGetBasicBlocksize();
     dim3 threads(blockSize, blockSize);
 
     for (int plane = 0; plane < d->vi.format->numPlanes; plane++) {
         uint8_t *dst = vsapi->getWritePtr(d->f, plane);
         int stride = vsapi->getStride(d->f, plane);
-        uint32_t c = ((union color *)color)->i[plane];
+        //uint32_t c = ((union color *)color)->i[plane];
+        uint32_t c = d->color.i[plane];
         int width = vsapi->getFrameWidth(d->f, plane);
         int height = vsapi->getFrameHeight(d->f, plane);
         const VSCUDAStream *stream = vsapi->getStream(d->f, plane);

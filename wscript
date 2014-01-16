@@ -351,7 +351,7 @@ def configure(conf):
         xcompiler_options = []
 
         for option in unsafe_options:
-            if option in ['-fPIC', '-ggdb', '-ftrapv']:
+            if option in ['-fPIC', '-ggdb', '-ftrapv', '-std=c++0x']:
                 xcompiler_options.append(option)
             else:
                 safe_options.append(option)
@@ -387,7 +387,9 @@ def build(bld):
         return srcpaths
 
     uses = ['SWSCALE', 'AVUTIL', 'AVCODEC']
-    cuda_uses = ['CUDA', 'CUDART']
+
+    if bld.env.CUDA == 'true':
+        uses += ['CUDA', 'CUDART']
 
     if not bld.env.DEST_OS in ['win32', 'cygwin', 'msys', 'uwin']:
         uses += ['M']
@@ -407,7 +409,7 @@ def build(bld):
 
         bld(features = 'c cxx asm',
             includes = 'include',
-            use = uses.extend(cuda_uses),
+            use = uses,
             source = bld.path.ant_glob(sources),
             target = 'objs')
 

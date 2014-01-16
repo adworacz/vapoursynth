@@ -62,12 +62,12 @@ typedef struct {
     ExprOp *gpu_ops[3];
     std::vector<ExprOp> ops[3];
     int plane[3];
-#ifdef VS_X86
+#ifdef VS_TARGET_CPU_X86
     void *stack;
 #else
     std::vector<float> stack;
 #endif
-} JitExprData;
+} ExprData;
 
 //Since we don't support the allocation of variable size arrays in
 //each thread's local memory, we will just have to work with a large

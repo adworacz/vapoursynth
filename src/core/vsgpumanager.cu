@@ -46,12 +46,12 @@ VSGPUManager::VSGPUManager() {
 }
 
 VSCUDAStream * VSGPUManager::getNextStream() {
+    std::lock_guard<std::mutex> lock(streamLock);
+
     VSCUDAStream *stream;
 
-    lock.lock();
     stream = &streams[streamIndex];
     streamIndex = (streamIndex + 1) % numberOfStreams;
-    lock.unlock();
 
     return stream;
 }

@@ -105,7 +105,7 @@ extern "C" void vs_evaluate_expr_sse2(const void *exprs, const uint8_t **rwptrs,
 #endif
 
 #if VS_FEATURE_CUDA
-extern void VS_CC exprProcessCUDA(const VSFrameRef **src, VSFrameRef *dst, const JitExprData *d,
+extern void VS_CC exprProcessCUDA(const VSFrameRef **src, VSFrameRef *dst, const ExprData *d,
                                        VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi);
 extern ExprOp * VS_CC copyExprOps(const ExprOp *vops, int numOps);
 extern void VS_CC freeExprOps(ExprOp *gpu_ops);
@@ -341,9 +341,8 @@ static const VSFrameRef *VS_CC exprGetFrame(int n, int activationReason, void **
                     }
                 }
             }
-#endif
         }
-
+#endif
         for (int i = 0; i < 3; i++)
             vsapi->freeFrame(src[i]);
         return dst;

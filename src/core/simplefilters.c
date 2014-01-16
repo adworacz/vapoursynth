@@ -1034,7 +1034,7 @@ typedef struct {
 } BlankClipData;
 
 #if VS_FEATURE_CUDA
-extern void VS_CC blankClipProcessCUDA(void *color, const BlankClipData *d, VSCore *core, const VSAPI *vsapi);
+extern void VS_CC blankClipProcessCUDA(const BlankClipData *d, VSCore *core, const VSAPI *vsapi);
 #endif
 
 static void VS_CC blankClipInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
@@ -1053,7 +1053,7 @@ static const VSFrameRef *VS_CC blankClipGetframe(int n, int activationReason, vo
             if (d->gpu) {
 #if VS_FEATURE_CUDA
                 frame = vsapi->newVideoFrameAtLocation(d->vi.format, d->vi.width, d->vi.height, 0, core, flGPU);
-                blankClipProcessCUDA(d->color, d, core, vsapi); //TODO: Remove the unnecessary d->color parameter.
+                blankClipProcessCUDA(d, core, vsapi); //TODO: Remove the unnecessary d->color parameter.
 #endif
             } else {
                 frame = vsapi->newVideoFrame(d->vi.format, d->vi.width, d->vi.height, 0, core);

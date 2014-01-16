@@ -24,13 +24,13 @@
 #include "VSCuda.h"
 #include "VSHelper.h"
 
-//Note: FrameLocation is necessary in order to manage memory correctly in the VSFrameData destructor.
-VSFrameData::VSFrameData(int width, int height, int *stride, int bytesPerSample, MemoryUse * mem,
+//Note: FrameLocation is necessary in order to manage memory correctly in the VSFPlaneData destructor.
+VSFPlaneData::VSFPlaneData(int width, int height, int *stride, int bytesPerSample, MemoryUse * mem,
                          FrameLocation fLocation, const VSCUDAStream *stream_in) : mem(mem), frameLocation(fLocation) {
     cudaPitchedPtr d_ptr;
 
     if (fLocation != flGPU) {
-        qFatal("Only GPU memory allocation is currently supported by this function. This needs to be fixed.");
+        vsFatal("Only GPU memory allocation is currently supported by this function. This needs to be fixed.");
     }
 
     CHECKCUDA(cudaMalloc3D(&d_ptr, make_cudaExtent(width * bytesPerSample, height, 1)));
@@ -41,7 +41,7 @@ VSFrameData::VSFrameData(int width, int height, int *stride, int bytesPerSample,
     mem->add(size);
 }
 
-VSFrameData::VSFrameData(const VSFrameData &d) : QSharedData(d) {
+VSFPlaneData::VSFPlaneData(const VSFPlaneData &d) {
     size = d.size;
     mem = d.mem;
     frameLocation = d.frameLocation;
@@ -49,7 +49,9 @@ VSFrameData::VSFrameData(const VSFrameData &d) : QSharedData(d) {
 
     if (frameLocation == flLocal) {
         data = vs_aligned_malloc<uint8_t>(size, VSFrame::alignment);
-        Q_CHECK_PTR(data);
+        assert(data);
+        if (!data)
+            vsFatal("Failed to allocate memory for plane in copy constructor. Out of memory.");
         memcpy(data, d.data, size);
     } else {
         CHECKCUDA(cudaMalloc(&data, size));
@@ -59,7 +61,7 @@ VSFrameData::VSFrameData(const VSFrameData &d) : QSharedData(d) {
     mem->add(size);
 }
 
-VSFrameData::~VSFrameData() {
+VSFPlaneData::~VSFPlaneData() {
     if (frameLocation == flLocal)
         vs_aligned_free(data);
     else
@@ -69,7 +71,7 @@ VSFrameData::~VSFrameData() {
 }
 
 //Transfer video frame data asynchronously using the given cudaStream.
-void VSFrameData::transferData(VSFrameData *dst, int dstStride,
+void VSFPlaneData::transferData(VSFPlaneData *dst, int dstStride,
                                int srcStride, int width, int height, int bytesPerSample,
                                FrameTransferDirection direction) const {
     cudaMemcpyKind transferKind = (direction == ftdCPUtoGPU ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToHost);
@@ -88,13 +90,13 @@ VSFrame::VSFrame(const VSFormat * f, int width, int height, const VSFrame * prop
                  FrameLocation fLocation, const VSCUDAStream **streams) : format(f), width(width), height(height),
                  frameLocation(fLocation) {
     if (!f || width <= 0 || height <= 0)
-        qFatal("Invalid new frame");
+        vsFatal("Invalid new frame");
 
     if (propSrc)
         properties = propSrc->properties;
 
     if (frameLocation != flLocal && frameLocation != flGPU)
-        qFatal("Invalid frame location. Please use flLocal or flGPU. Specified: %d", frameLocation);
+        vsFatal("Invalid frame location. Please use flLocal or flGPU. Specified: %d", frameLocation);
 
     if (format->numPlanes != 3) {
         stride[1] = 0;
@@ -112,11 +114,11 @@ VSFrame::VSFrame(const VSFormat * f, int width, int height, const VSFrame * prop
             stride[2] = plane23;
         }
 
-        data[0] = new VSFrameData(stride[0] * height, core->memory);
+        data[0] = new VSFPlaneData(stride[0] * height, core->memory);
         if (f->numPlanes == 3) {
             int size23 = stride[1] * (height >> f->subSamplingH);
-            data[1] = new VSFrameData(size23, core->memory);
-            data[2] = new VSFrameData(size23, core->memory);
+            data[1] = new VSFPlaneData(size23, core->memory);
+            data[2] = new VSFPlaneData(size23, core->memory);
         }
     } else {
         //Handle GPU implementation.
@@ -125,7 +127,7 @@ VSFrame::VSFrame(const VSFormat * f, int width, int height, const VSFrame * prop
             int compensatedHeight = (plane ? height >> f->subSamplingH : height);
 
             data[plane] =
-                new VSFrameData(compensatedWidth, compensatedHeight, &stride[plane], f->bytesPerSample,
+                new VSFPlaneData(compensatedWidth, compensatedHeight, &stride[plane], f->bytesPerSample,
                                 core->gpuMemory, frameLocation, streams[plane]);
         }
     }
@@ -133,7 +135,7 @@ VSFrame::VSFrame(const VSFormat * f, int width, int height, const VSFrame * prop
 
 VSFrame::VSFrame(const VSFormat *f, int width, int height, const VSFrame * const *planeSrc, const int *plane, const VSFrame *propSrc, VSCore *core, FrameLocation fLocation, const VSCUDAStream **streams) : format(f), width(width), height(height), frameLocation(fLocation) {
     if (!f || width <= 0 || height <= 0)
-        qFatal("Invalid new frame");
+        vsFatal("Invalid new frame");
 
     if (propSrc)
         properties = propSrc->properties;
@@ -157,9 +159,9 @@ VSFrame::VSFrame(const VSFormat *f, int width, int height, const VSFrame * const
     for (int i = 0; i < format->numPlanes; i++) {
         if (planeSrc[i]) {
             if (plane[i] < 0 || plane[i] >= planeSrc[i]->format->numPlanes)
-                qFatal("Plane does no exist, error in frame creation");
+                vsFatal("Plane does no exist, error in frame creation");
             if (planeSrc[i]->getHeight(plane[i]) != getHeight(i) || planeSrc[i]->getWidth(plane[i]) != getWidth(i))
-                qFatal("Copied plane dimensions do not match, error in frame creation");
+                vsFatal("Copied plane dimensions do not match, error in frame creation");
             data[i] = planeSrc[i]->data[plane[i]];
             stride[i] = planeSrc[i]->stride[plane[i]];
         } else {
@@ -167,9 +169,9 @@ VSFrame::VSFrame(const VSFormat *f, int width, int height, const VSFrame * const
             int compensatedHeight = (i ? height >> f->subSamplingH : height);
 
             if (frameLocation == flLocal)
-                data[i] = new VSFrameData(stride[i] * compensatedHeight, core->memory);
+                data[i] = new VSFPlaneData(stride[i] * compensatedHeight, core->memory);
             else
-                data[i] = new VSFrameData(compensatedWidth, compensatedHeight, &stride[i], f->bytesPerSample,
+                data[i] = new VSFPlaneData(compensatedWidth, compensatedHeight, &stride[i], f->bytesPerSample,
                             core->gpuMemory, frameLocation, streams[i]);
         }
     }
@@ -177,10 +179,10 @@ VSFrame::VSFrame(const VSFormat *f, int width, int height, const VSFrame * const
 
 void VSFrame::transferFrame(VSFrame &dstFrame, FrameTransferDirection direction) const {
     if(dstFrame.width != width || dstFrame.height != height)
-        qFatal("The source frame and destination frame dimensions do not match.");
+        vsFatal("The source frame and destination frame dimensions do not match.");
 
     if(dstFrame.format->numPlanes != format->numPlanes)
-        qFatal("The source frame and destination frame do not have the same number of planes.");
+        vsFatal("The source frame and destination frame do not have the same number of planes.");
 
     for(int plane = 0; plane < format->numPlanes; plane++) {
         data[plane].data()->transferData(dstFrame.data[plane].data(), dstFrame.stride[plane],
@@ -191,7 +193,7 @@ void VSFrame::transferFrame(VSFrame &dstFrame, FrameTransferDirection direction)
 
 const VSCUDAStream *VSFrame::getStream(int plane) const {
     if (plane < 0 || plane >= format->numPlanes)
-        qFatal("Invalid plane requested");
+        vsFatal("Invalid plane requested");
 
     switch (plane) {
     case 0:

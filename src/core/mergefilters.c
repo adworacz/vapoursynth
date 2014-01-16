@@ -217,10 +217,6 @@ static void VS_CC mergeCreate(const VSMap *in, VSMap *out, void *userData, VSCor
 extern void vs_masked_merge_uint8_sse2(const uint8_t *srcp1, const uint8_t *srcp2, const uint8_t *maskp, uint8_t *dstp, intptr_t stride, int height);
 #endif
 
-#if VS_FEATURE_CUDA
-extern void VS_CC maskedMergeProcessCUDA(const VSFrameRef *src1, const VSFrameRef *src2, VSFrameRef *dst, const VSFrameRef *mask, const VSFrameRef *mask23, const MaskedMergeData *d, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi);
-#endif
-
 typedef struct {
     const VSVideoInfo *vi;
     VSNodeRef *node1;
@@ -230,6 +226,11 @@ typedef struct {
     int first_plane;
     int process[3];
 } MaskedMergeData;
+
+
+#if VS_FEATURE_CUDA
+extern void VS_CC maskedMergeProcessCUDA(const VSFrameRef *src1, const VSFrameRef *src2, VSFrameRef *dst, const VSFrameRef *mask, const VSFrameRef *mask23, const MaskedMergeData *d, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi);
+#endif
 
 static void VS_CC maskedMergeInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
     MaskedMergeData *d = (MaskedMergeData *) * instanceData;
