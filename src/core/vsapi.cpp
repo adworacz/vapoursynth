@@ -586,16 +586,16 @@ static void VS_CC setMessageHandler(VSMessageHandler handler, void *userData) {
 
 #if VS_FEATURE_CUDA
 static VSFrameRef *VS_CC newVideoFrameAtLocation(const VSFormat *format, int width, int height, const VSFrameRef *propSrc, VSCore *core, FrameLocation fLocation) {
-    Q_ASSERT(format);
-    return new VSFrameRef(core->newVideoFrame(format, width, height, propSrc ? propSrc->frame.data() : NULL, fLocation));
+    assert(format && core);
+    return new VSFrameRef(core->newVideoFrame(format, width, height, propSrc ? propSrc->frame.get() : NULL, fLocation));
 }
 
 static VSFrameRef *VS_CC newVideoFrameAtLocation2(const VSFormat *format, int width, int height, const VSFrameRef **planeSrc, const int *planes, const VSFrameRef *propSrc, VSCore *core, FrameLocation fLocation) {
-    Q_ASSERT(format);
+    assert(format && core);
     VSFrame *fp[3];
     for (int i = 0; i < format->numPlanes; i++)
-        fp[i] = planeSrc[i] ? planeSrc[i]->frame.data() : NULL;
-    return new VSFrameRef(core->newVideoFrame(format, width, height, fp, planes, propSrc ? propSrc->frame.data() : NULL, fLocation));
+        fp[i] = planeSrc[i] ? planeSrc[i]->frame.get() : NULL;
+    return new VSFrameRef(core->newVideoFrame(format, width, height, fp, planes, propSrc ? propSrc->frame.get() : NULL, fLocation));
 }
 
 static void VS_CC transferVideoFrame(const VSFrameRef *srcFrame, VSFrameRef *dstFrame, FrameTransferDirection direction, VSCore *core){

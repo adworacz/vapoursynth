@@ -237,7 +237,7 @@ void VS_CC freeExprOps(ExprOp *gpu_ops) {
     CHECKCUDA(cudaFree(gpu_ops));
 }
 
-void VS_CC exprProcessCUDA(const VSFrameRef **src, VSFrameRef *dst, const JitExprData *d,
+void VS_CC exprProcessCUDA(const VSFrameRef **src, VSFrameRef *dst, const ExprData *d,
                                            VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     int blockSize = VSCUDAGetBasicBlocksize();
     dim3 threads(blockSize, blockSize);

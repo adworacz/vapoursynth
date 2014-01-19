@@ -351,8 +351,10 @@ def configure(conf):
         xcompiler_options = []
 
         for option in unsafe_options:
-            if option in ['-fPIC', '-ggdb', '-ftrapv', '-std=c++0x']:
+            if option in ['-fPIC', '-ggdb', '-ftrapv']:
                 xcompiler_options.append(option)
+            elif option in ['-std=c++0x']:
+                pass
             else:
                 safe_options.append(option)
 
@@ -364,9 +366,9 @@ def configure(conf):
     convert_cuda_cxx_options()
 
     # Handle CUDA compilation on GCC > 4.6
-    if conf.env.CC_VERSION >= ('4','7','0'):
-        print("Fixing CUDA compilation with GCC >= 4.7")
-        add_options(['NVCC_CXXFLAGS'],['-include','../include/fix_cuda_cxx.h'])
+    # if conf.env.CC_VERSION >= ('4','7','0'):
+    #     print("Fixing CUDA compilation with GCC >= 4.7")
+    #     add_options(['NVCC_CXXFLAGS'],['-include','../include/fix_cuda_cxx.h'])
 
 def build(bld):
     def search_paths(paths):
