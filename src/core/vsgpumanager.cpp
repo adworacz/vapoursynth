@@ -20,6 +20,7 @@
 
 #include <stdexcept>
 #include "vsgpumanager.h"
+#include "vscuda.h"
 
 VSGPUManager::VSGPUManager() {
     cudaDeviceProp * deviceProps = VSCUDAGetDefaultDeviceProperties();
@@ -38,7 +39,7 @@ VSGPUManager::VSGPUManager() {
 
     //Initialize our streams.
     for (int i = 0; i < numberOfStreams; i++)
-        CHECKCUDA(cudaStreamCreate(&(streams[i].stream)));
+        vscuda_createStream(&streams[i]);
 
     //We are going to assign a stream per frame, or per plane,
     //but either way we need to see what happens when we incorporate lots of streams.
@@ -58,12 +59,12 @@ VSCUDAStream * VSGPUManager::getNextStream() {
 
 VSGPUManager::~VSGPUManager() {
     for (int i = 0; i < numberOfStreams; i++) {
-        CHECKCUDA(cudaStreamDestroy(streams[i].stream));
+        vscuda_destroyStream(streams[i]);
     }
 
     free(streams);
 
-    CHECKCUDA(cudaDeviceSynchronize());
+    vscuda_deviceSynchronize();
     //For some reason, calling cudaDeviceReset() here
     //causes a crash on script exit. Not quite sure why,
     //needs to be investigated more.
