@@ -346,22 +346,23 @@ def configure(conf):
         We can't simply change the CXXFLAGS, as -Xcompiler is an invalid option for GCC,
         so we simply copy over all options, modifying the 'fPIC' option as we go."""
 
-        unsafe_options = conf.env['CXXFLAGS']
-        safe_options = []
+        unclean_options = conf.env['CXXFLAGS']
+        unsafe_options = ['-fPIC', '-ggdb', '-ftrapv']
+        clean_options = []
         xcompiler_options = []
 
-        for option in unsafe_options:
-            if option in ['-fPIC', '-ggdb', '-ftrapv']:
+        for option in unclean_options:
+            if option in unsafe_options:
                 xcompiler_options.append(option)
             elif option in ['-std=c++0x']:
                 pass
             else:
-                safe_options.append(option)
+                clean_options.append(option)
 
         if xcompiler_options:
-            safe_options.extend(['-Xcompiler', ','.join(xcompiler_options)])
+            clean_options.extend(['-Xcompiler', ','.join(xcompiler_options)])
 
-        add_options(['NVCC_CXXFLAGS'], safe_options)
+        add_options(['NVCC_CXXFLAGS'], clean_options)
 
     convert_cuda_cxx_options()
 

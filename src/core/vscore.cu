@@ -197,11 +197,11 @@ const VSCUDAStream *VSFrame::getStream(int plane) const {
 
     switch (plane) {
     case 0:
-        return data[0].constData()->stream;
+        return data[0]->stream;
     case 1:
-        return data[1].constData()->stream;
+        return data[1]->stream;
     case 2:
-        return data[2].constData()->stream;
+        return data[2]->stream;
     default:
         return NULL;
     }
