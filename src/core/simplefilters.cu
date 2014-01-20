@@ -20,7 +20,7 @@
 
 // Contains the CUDA implementations of the simplefilters operations.
 #include "VapourSynth.h"
-#include "VSCuda.h"
+#include "VSCudaHelper.h"
 
 
 //////////////////////////////////////////

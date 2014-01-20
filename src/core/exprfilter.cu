@@ -22,7 +22,7 @@
 #include <vector>
 #include <stdexcept>
 #include "VapourSynth.h"
-#include "VSCuda.h"
+#include "VSCudaHelper.h"
 
 typedef enum {
     opLoadSrc8, opLoadSrc16, opLoadSrcF, opLoadConst,

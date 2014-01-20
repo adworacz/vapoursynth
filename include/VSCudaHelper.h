@@ -17,8 +17,8 @@
 * License along with VapourSynth; if not, write to the Free Software
 * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 */
-#ifndef VSCUDA
-#define VSCUDA
+#ifndef VSCUDAHELPER
+#define VSCUDAHELPER
 
 #include <stdio.h>
 #include <stdlib.h>

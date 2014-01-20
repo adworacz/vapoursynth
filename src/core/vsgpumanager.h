@@ -21,7 +21,7 @@
 #define VSGPUMANAGER
 
 #include <cuda_runtime.h>
-#include "VSCuda.h"
+#include "VSCudaHelper.h"
 #include <mutex>
 
 struct VSGPUManager {

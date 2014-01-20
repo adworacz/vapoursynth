@@ -21,7 +21,7 @@
 // A CUDA specific file for all CUDA-aimed functions of the VSCore.
 
 #include "vscore.h"
-#include "VSCuda.h"
+#include "VSCudaHelper.h"
 #include "VSHelper.h"
 
 //Note: FrameLocation is necessary in order to manage memory correctly in the VSFPlaneData destructor.
