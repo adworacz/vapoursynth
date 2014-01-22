@@ -22,7 +22,6 @@
 #include "VapourSynth.h"
 #include "VSCudaHelper.h"
 
-
 //////////////////////////////////////////
 // AddBorders
 typedef struct {

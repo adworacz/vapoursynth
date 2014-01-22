@@ -1053,7 +1053,7 @@ static const VSFrameRef *VS_CC blankClipGetframe(int n, int activationReason, vo
             if (d->gpu) {
 #if VS_FEATURE_CUDA
                 frame = vsapi->newVideoFrameAtLocation(d->vi.format, d->vi.width, d->vi.height, 0, core, flGPU);
-                blankClipProcessCUDA(d, core, vsapi); //TODO: Remove the unnecessary d->color parameter.
+                blankClipProcessCUDA(d, core, vsapi);
 #endif
             } else {
                 frame = vsapi->newVideoFrame(d->vi.format, d->vi.width, d->vi.height, 0, core);
