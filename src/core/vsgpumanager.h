@@ -20,7 +20,6 @@
 #ifndef VSGPUMANAGER
 #define VSGPUMANAGER
 
-#include <cuda_runtime.h>
 #include "VSCudaHelper.h"
 #include <mutex>
 

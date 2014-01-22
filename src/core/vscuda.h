@@ -3,6 +3,7 @@
 
 #include "VSCudaHelper.h"
 
+// CUDA Device Management
 void vscuda_deviceSynchronize();
 
 // CUDA Stream Management
