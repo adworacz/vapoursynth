@@ -5,7 +5,7 @@ import vapoursynth as vs
 class CoreTestSequence(unittest.TestCase):
 
     def setUp(self):
-        self.core = vs.Core()
+        self.core = vs.get_core(threads=1)
 
     def checkDifference(self, cpu, gpu):
         diff = self.core.std.PlaneDifference([cpu, gpu], 0, prop="PlaneDifference0")
