@@ -359,7 +359,7 @@ void VSThreadPool::startInternal(const PFrameContext &context) {
     //may be able to be optimized for two separate memory spaces.
     if (core->gpuMemory->isOverLimit()) {
         ticks = 0;
-        notifyCaches(cNeedMemory);
+        notifyCaches(true);
     }
 #endif
 
