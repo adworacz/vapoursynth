@@ -4,7 +4,7 @@
 * This file is part of VapourSynth.
 *
 * VapourSynth is free software; you can redistribute it and/or
-* modify it under the terms of the GNU Lesser General Public
+* modify it under the terms of the GNU Lesser General Publicd_ptr
 * License as published by the Free Software Foundation; either
 * version 2.1 of the License, or (at your option) any later version.
 *
@@ -21,11 +21,12 @@
 // A CUDA specific file for all CUDA-aimed functions of the VSCore.
 
 #include "vscore.h"
-#include "VSCudaHelper.h"
+#include "vscuda.h"
 #include "VSHelper.h"
+#include <assert.h>
 
-//Note: FrameLocation is necessary in order to manage memory correctly in the VSFPlaneData destructor.
-VSFPlaneData::VSFPlaneData(int width, int height, int *stride, int bytesPerSample, MemoryUse * mem,
+//Note: FrameLocation is necessary in order to manage memory correctly in the VSPlaneData destructor.
+VSPlaneData::VSPlaneData(int width, int height, int *stride, int bytesPerSample, MemoryUse * mem,
                          FrameLocation fLocation, const VSCUDAStream *stream_in) : mem(mem), frameLocation(fLocation) {
     cudaPitchedPtr d_ptr;
 
@@ -33,7 +34,8 @@ VSFPlaneData::VSFPlaneData(int width, int height, int *stride, int bytesPerSampl
         vsFatal("Only GPU memory allocation is currently supported by this function. This needs to be fixed.");
     }
 
-    CHECKCUDA(cudaMalloc3D(&d_ptr, make_cudaExtent(width * bytesPerSample, height, 1)));
+    vscuda_malloc3D(&d_ptr, width, height, bytesPerSample);
+
     data = (uint8_t *) d_ptr.ptr;
     *stride = d_ptr.pitch;
     stream = stream_in;
@@ -41,7 +43,7 @@ VSFPlaneData::VSFPlaneData(int width, int height, int *stride, int bytesPerSampl
     mem->add(size);
 }
 
-VSFPlaneData::VSFPlaneData(const VSFPlaneData &d) {
+VSPlaneData::VSPlaneData(const VSPlaneData &d) {
     size = d.size;
     mem = d.mem;
     frameLocation = d.frameLocation;
@@ -54,24 +56,24 @@ VSFPlaneData::VSFPlaneData(const VSFPlaneData &d) {
             vsFatal("Failed to allocate memory for plane in copy constructor. Out of memory.");
         memcpy(data, d.data, size);
     } else {
-        CHECKCUDA(cudaMalloc(&data, size));
-        CHECKCUDA(cudaMemcpyAsync(data, d.data, size, cudaMemcpyDeviceToDevice, stream->stream));
+        vscuda_malloc(&data, size);
+        vscuda_memcpyAsync(data, d.data, size, cudaMemcpyDeviceToDevice, stream->stream);
     }
 
     mem->add(size);
 }
 
-VSFPlaneData::~VSFPlaneData() {
+VSPlaneData::~VSPlaneData() {
     if (frameLocation == flLocal)
         vs_aligned_free(data);
     else
-        CHECKCUDA(cudaFree(data));
+        vscuda_free(data);
 
     mem->subtract(size);
 }
 
 //Transfer video frame data asynchronously using the given cudaStream.
-void VSFPlaneData::transferData(VSFPlaneData *dst, int dstStride,
+void VSPlaneData::transferData(VSPlaneData *dst, int dstStride,
                                int srcStride, int width, int height, int bytesPerSample,
                                FrameTransferDirection direction) const {
     cudaMemcpyKind transferKind = (direction == ftdCPUtoGPU ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToHost);
@@ -82,7 +84,7 @@ void VSFPlaneData::transferData(VSFPlaneData *dst, int dstStride,
     else
         newStream = stream;
 
-    CHECKCUDA(cudaMemcpy2DAsync(dst->data, dstStride, data, srcStride, width * bytesPerSample, height, transferKind, newStream->stream));
+    vscuda_memcpy2DAsync(dst->data, dstStride, data, srcStride, width * bytesPerSample, height, transferKind, newStream->stream);
 }
 
 //Note: future integration can use default parameters to prevent code duplication.
@@ -98,7 +100,16 @@ VSFrame::VSFrame(const VSFormat * f, int width, int height, const VSFrame * prop
     if (frameLocation != flLocal && frameLocation != flGPU)
         vsFatal("Invalid frame location. Please use flLocal or flGPU. Specified: %d", frameLocation);
 
-    if (format->numPlanes != 3) {
+    //Calculate the stride.
+    //WARNING: This stride gets over written when allocating on the GPU, in order to meet
+    //GPU memory alignment requirements.
+    stride[0] = (width * (f->bytesPerSample) + (alignment - 1)) & ~(alignment - 1);
+
+    if (f->numPlanes == 3) {
+        int plane23 = ((width >> f->subSamplingW) * (f->bytesPerSample) + (alignment - 1)) & ~(alignment - 1);
+        stride[1] = plane23;
+        stride[2] = plane23;
+    } else {
         stride[1] = 0;
         stride[2] = 0;
     }
@@ -106,19 +117,11 @@ VSFrame::VSFrame(const VSFormat * f, int width, int height, const VSFrame * prop
     if (frameLocation == flLocal) {
         //Handle CPU implementation.
         //This is a simple copy and paste of the vscore.cpp VSFrame constructor.
-        stride[0] = (width * (f->bytesPerSample) + (alignment - 1)) & ~(alignment - 1);
-
-        if (f->numPlanes == 3) {
-            int plane23 = ((width >> f->subSamplingW) * (f->bytesPerSample) + (alignment - 1)) & ~(alignment - 1);
-            stride[1] = plane23;
-            stride[2] = plane23;
-        }
-
-        data[0] = new VSFPlaneData(stride[0] * height, core->memory);
+        data[0] = std::make_shared<VSPlaneData>(stride[0] * height, core->memory);
         if (f->numPlanes == 3) {
             int size23 = stride[1] * (height >> f->subSamplingH);
-            data[1] = new VSFPlaneData(size23, core->memory);
-            data[2] = new VSFPlaneData(size23, core->memory);
+            data[1] = std::make_shared<VSPlaneData>(size23, core->memory);
+            data[2] = std::make_shared<VSPlaneData>(size23, core->memory);
         }
     } else {
         //Handle GPU implementation.
@@ -127,7 +130,7 @@ VSFrame::VSFrame(const VSFormat * f, int width, int height, const VSFrame * prop
             int compensatedHeight = (plane ? height >> f->subSamplingH : height);
 
             data[plane] =
-                new VSFPlaneData(compensatedWidth, compensatedHeight, &stride[plane], f->bytesPerSample,
+                std::make_shared<VSPlaneData>(compensatedWidth, compensatedHeight, &stride[plane], f->bytesPerSample,
                                 core->gpuMemory, frameLocation, streams[plane]);
         }
     }
@@ -140,11 +143,6 @@ VSFrame::VSFrame(const VSFormat *f, int width, int height, const VSFrame * const
     if (propSrc)
         properties = propSrc->properties;
 
-    if (format->numPlanes != 3) {
-        stride[1] = 0;
-        stride[2] = 0;
-    }
-
     //Calculate the stride.
     //WARNING: This stride gets over written when allocating on the GPU, in order to meet
     //GPU memory alignment requirements.
@@ -154,6 +152,9 @@ VSFrame::VSFrame(const VSFormat *f, int width, int height, const VSFrame * const
         int plane23 = ((width >> f->subSamplingW) * (f->bytesPerSample) + (alignment - 1)) & ~(alignment - 1);
         stride[1] = plane23;
         stride[2] = plane23;
+    } else {
+        stride[1] = 0;
+        stride[2] = 0;
     }
 
     for (int i = 0; i < format->numPlanes; i++) {
@@ -169,9 +170,9 @@ VSFrame::VSFrame(const VSFormat *f, int width, int height, const VSFrame * const
             int compensatedHeight = (i ? height >> f->subSamplingH : height);
 
             if (frameLocation == flLocal)
-                data[i] = new VSFPlaneData(stride[i] * compensatedHeight, core->memory);
+                data[i] = std::make_shared<VSPlaneData>(stride[i] * compensatedHeight, core->memory);
             else
-                data[i] = new VSFPlaneData(compensatedWidth, compensatedHeight, &stride[i], f->bytesPerSample,
+                data[i] = std::make_shared<VSPlaneData>(compensatedWidth, compensatedHeight, &stride[i], f->bytesPerSample,
                             core->gpuMemory, frameLocation, streams[i]);
         }
     }
@@ -185,7 +186,7 @@ void VSFrame::transferFrame(VSFrame &dstFrame, FrameTransferDirection direction)
         vsFatal("The source frame and destination frame do not have the same number of planes.");
 
     for(int plane = 0; plane < format->numPlanes; plane++) {
-        data[plane].data()->transferData(dstFrame.data[plane].data(), dstFrame.stride[plane],
+        data[plane]->transferData(dstFrame.data[plane].get(), dstFrame.stride[plane],
                                                   stride[plane], getWidth(plane),
                                                   getHeight(plane), format->bytesPerSample, direction);
     }
@@ -212,7 +213,7 @@ PVideoFrame VSCore::newVideoFrame(const VSFormat *f, int width, int height, cons
     for(int plane = 0; plane < f->numPlanes; plane++) {
         streams[plane] = gpuManager->getNextStream();
     }
-    return PVideoFrame(new VSFrame(f, width, height, propSrc, this, fLocation, streams));
+    return std::make_shared<VSFrame>(f, width, height, propSrc, this, fLocation, streams);
 }
 
 PVideoFrame VSCore::newVideoFrame(const VSFormat *f, int width, int height, const VSFrame * const *planeSrc, const int *planes, const VSFrame *propSrc, FrameLocation fLocation) {
@@ -225,11 +226,11 @@ PVideoFrame VSCore::newVideoFrame(const VSFormat *f, int width, int height, cons
         else
             streams[plane] = NULL;
     }
-    return PVideoFrame(new VSFrame(f, width, height, planeSrc, planes, propSrc, this, fLocation, streams));
+    return std::make_shared<VSFrame>(f, width, height, planeSrc, planes, propSrc, this, fLocation, streams);
 }
 
 void VSCore::transferVideoFrame(const PVideoFrame &srcf, PVideoFrame &dstf, FrameTransferDirection direction){
-    srcf->transferFrame(*dstf.data(), direction);
+    srcf->transferFrame(*dstf.get(), direction);
 }
 
 VSGPUManager *VSCore::getGPUManager() const {
