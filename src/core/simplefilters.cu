@@ -142,18 +142,18 @@ static __global__ void blankClipKernel(uint8_t *dstp, int stride, int width, int
     ((uint32_t *)dstp)[stride * row + column] = dst_data;
 }
 
-VS_EXTERN_C void VS_CC blankClipProcessCUDA(const BlankClipData *d, VSCore *core, const VSAPI *vsapi) {
+VS_EXTERN_C void VS_CC blankClipProcessCUDA(VSFrameRef *frame, const BlankClipData *d, VSCore *core, const VSAPI *vsapi) {
     int blockSize = VSCUDAGetBasicBlocksize();
     dim3 threads(blockSize, blockSize);
 
     for (int plane = 0; plane < d->vi.format->numPlanes; plane++) {
-        uint8_t *dst = vsapi->getWritePtr(d->f, plane);
-        int stride = vsapi->getStride(d->f, plane);
+        uint8_t *dst = vsapi->getWritePtr(frame, plane);
+        int stride = vsapi->getStride(frame, plane);
         //uint32_t c = ((union color *)color)->i[plane];
         uint32_t c = d->color.i[plane];
-        int width = vsapi->getFrameWidth(d->f, plane);
-        int height = vsapi->getFrameHeight(d->f, plane);
-        const VSCUDAStream *stream = vsapi->getStream(d->f, plane);
+        int width = vsapi->getFrameWidth(frame, plane);
+        int height = vsapi->getFrameHeight(frame, plane);
+        const VSCUDAStream *stream = vsapi->getStream(frame, plane);
         dim3 grid(ceil((float)width / (threads.x * (sizeof(uint32_t) / d->vi.format->bytesPerSample))), ceil((float)height / threads.y));
         switch (d->vi.format->bytesPerSample) {
         case 1:

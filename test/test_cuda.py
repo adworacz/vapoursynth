@@ -14,9 +14,9 @@ class CoreTestSequence(unittest.TestCase):
 
         for i in range(diff.num_frames):
             frame = diff.get_frame(i)
-            self.assertEqual(frame.props.PlaneDifference0[0], 0)
-            self.assertEqual(frame.props.PlaneDifference1[0], 0)
-            self.assertEqual(frame.props.PlaneDifference2[0], 0)
+            self.assertEqual(frame.props.PlaneDifference0, 0)
+            self.assertEqual(frame.props.PlaneDifference1, 0)
+            self.assertEqual(frame.props.PlaneDifference2, 0)
 
     def testAddBorders(self):
         gpu = self.core.std.BlankClip(format=vs.YUV420P8, color=[69, 242, 115], gpu=1)
