@@ -10,16 +10,16 @@
 
 // CUDA Memory Management
 void vscuda_free(void *data) {
-	if (data) {
-		CHECKCUDA(cudaFree(data));	
-	} else {
-		vsWarning("Called free on an empty pointer.");
-	}
+    if (data) {
+        CHECKCUDA(cudaFree(data));	
+    } else {
+        vsWarning("Called free on an empty pointer.");
+    }
 }
 
 void vscuda_malloc3D(cudaPitchedPtr *ptr, int width, int height, int bytesPerSample) {
-	CHECKCUDA(cudaMalloc3D(ptr, make_cudaExtent(width * bytesPerSample, height, 1)));
-	assert(ptr->ptr);
+    CHECKCUDA(cudaMalloc3D(ptr, make_cudaExtent(width * bytesPerSample, height, 1)));
+    assert(ptr->ptr);
     if (!(ptr->ptr))
         vsFatal("Failed to allocate memory for plane on the GPU. Out of memory.");
 }
@@ -47,10 +47,18 @@ void vscuda_deviceSynchronize() {
 
 
 // CUDA Stream Management
-void vscuda_createStream(VSCUDAStream *vsStream) {
-	CHECKCUDA(cudaStreamCreate(&(vsStream->stream)));
+void vscuda_createStreams(VSCUDAStream *vsStreams, int numberOfStreams) {
+	for (int i = 0; i < numberOfStreams; i++) {
+		CHECKCUDA(cudaStreamCreate(&(vsStreams[i].stream)));
+		assert(vsStreams[i].stream);
+		if (!(vsStreams[i].stream)) {
+			vsFatal("Failed to create a CUDA stream on the GPU.");
+		}
+	}
 }
 
-void vscuda_destroyStream(VSCUDAStream vsStream) {
-	CHECKCUDA(cudaStreamDestroy(vsStream.stream));
+void vscuda_destroyStreams(VSCUDAStream *vsStreams, int numberOfStreams) {
+	for (int i = 0; i < numberOfStreams; i++) {
+		CHECKCUDA(cudaStreamDestroy(vsStreams[i].stream));
+	}
 }

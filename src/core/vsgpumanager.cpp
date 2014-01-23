@@ -37,9 +37,7 @@ VSGPUManager::VSGPUManager() {
 
     streams = (VSCUDAStream *) malloc(numberOfStreams * sizeof(VSCUDAStream));
 
-    //Initialize our streams.
-    for (int i = 0; i < numberOfStreams; i++)
-        vscuda_createStream(&streams[i]);
+    vscuda_createStreams(streams, numberOfStreams);
 
     //We are going to assign a stream per frame, or per plane,
     //but either way we need to see what happens when we incorporate lots of streams.
@@ -58,9 +56,7 @@ VSCUDAStream * VSGPUManager::getNextStream() {
 }
 
 VSGPUManager::~VSGPUManager() {
-    for (int i = 0; i < numberOfStreams; i++) {
-        vscuda_destroyStream(streams[i]);
-    }
+    vscuda_destroyStreams(streams, numberOfStreams);
 
     free(streams);
 

@@ -15,7 +15,7 @@ void vscuda_memcpy2DAsync(void* dst, size_t dstStride, const void* src, size_t s
 void vscuda_deviceSynchronize();
 
 // CUDA Stream Management
-void vscuda_createStream(VSCUDAStream *vsStream);
-void vscuda_destroyStream(VSCUDAStream vsStream);
+void vscuda_createStreams(VSCUDAStream *vsStreams, int numberOfStreams);
+void vscuda_destroyStreams(VSCUDAStream *vsStreams, int numberOfStreams);
 
 #endif
