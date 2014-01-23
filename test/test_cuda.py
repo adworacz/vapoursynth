@@ -48,19 +48,17 @@ class CoreTestSequence(unittest.TestCase):
     def testLutDifference(self):
         clip = self.core.std.BlankClip(format=vs.YUV420P8, color=[69, 242, 115])
 
-        luty = []
-        for x in range(2 ** clip.format.bits_per_sample):
-            luty.append(max(min(x, 235), 16))
-        lutuv = []
-        for x in range(2 ** clip.format.bits_per_sample):
-            lutuv.append(max(min(x, 100), 16))
+        def limity(x):
+            return max(min(x, 235), 16)
+        def limituv(x):
+            return max(min(x, 100), 16)
 
-        cpu = self.core.std.Lut(clip=clip, lut=luty, planes=0)
-        cpu = self.core.std.Lut(clip=cpu, lut=lutuv, planes=[1, 2])
+        cpu = self.core.std.Lut(clip=clip, planes=0, function=limity)
+        cpu = self.core.std.Lut(clip=cpu, planes=[1, 2], function=limituv)
 
         clip = self.core.std.TransferFrame(clip, 1)
-        gpu = self.core.std.Lut(clip=clip, lut=luty, planes=0)
-        gpu = self.core.std.Lut(clip=gpu, lut=lutuv, planes=[1, 2])
+        gpu = self.core.std.Lut(clip=clip, planes=0, function=limity)
+        gpu = self.core.std.Lut(clip=gpu, planes=[1, 2], function=limituv)
         gpu = self.core.std.TransferFrame(gpu, 0)
 
         self.checkDifference(cpu, gpu)
@@ -68,19 +66,17 @@ class CoreTestSequence(unittest.TestCase):
     def testLutDifference16bit(self):
         clip = self.core.std.BlankClip(format=vs.YUV420P10, color=[300, 700, 900])
 
-        luty = []
-        for x in range(2 ** clip.format.bits_per_sample):
-            luty.append(max(min(x, 800), 300))
-        lutuv = []
-        for x in range(2 ** clip.format.bits_per_sample):
-            lutuv.append(max(min(x, 800), 300))
+        def limity(x):
+            return max(min(x, 800), 300)
+        def limituv(x):
+            return max(min(x, 800), 300)
 
-        cpu = self.core.std.Lut(clip=clip, lut=luty, planes=0)
-        cpu = self.core.std.Lut(clip=cpu, lut=lutuv, planes=[1, 2])
+        cpu = self.core.std.Lut(clip=clip, planes=0, function=limity)
+        cpu = self.core.std.Lut(clip=cpu, planes=[1, 2], function=limituv)
 
         clip = self.core.std.TransferFrame(clip, 1)
-        gpu = self.core.std.Lut(clip=clip, lut=luty, planes=0)
-        gpu = self.core.std.Lut(clip=gpu, lut=lutuv, planes=[1, 2])
+        gpu = self.core.std.Lut(clip=clip, planes=0, function=limity)
+        gpu = self.core.std.Lut(clip=gpu, planes=[1, 2], function=limituv)
         gpu = self.core.std.TransferFrame(gpu, 0)
 
         self.checkDifference(cpu, gpu)
