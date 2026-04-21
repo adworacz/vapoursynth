@@ -325,14 +325,19 @@ static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSN
         else
             data->reorderMap[n].second = f;
 
+        printf("reorder size %d\n", (int)data->reorderMap.size());
+
         bool completed = isCompletedFrame(data->reorderMap[n], !!data->alphaNode);
 
         if (completed && data->requestedFrames < data->totalFrames) {
+            printf("requested %d, current %d, output %d\n", data->requestedFrames, n, data->outputFrames);
             data->vsapi->getFrameAsync(data->requestedFrames, data->node, frameDoneCallback, userData);
             if (data->alphaNode)
                 data->vsapi->getFrameAsync(data->requestedFrames, data->alphaNode, frameDoneCallback, userData);
             data->requestedFrames++;
         }
+
+        printf("reorder size %d\n", (int)data->reorderMap.size());
 
         while (data->reorderMap.count(data->outputFrames) && isCompletedFrame(data->reorderMap[data->outputFrames], !!data->alphaNode)) {
             const VSFrame *frame = data->reorderMap[data->outputFrames].first;
