@@ -329,14 +329,22 @@ static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSN
 
         bool completed = isCompletedFrame(data->reorderMap[n], !!data->alphaNode);
 
+        // if (completed && data->requestedFrames < data->totalFrames) {
+        //     fprintf(stderr, "requested %d, current %d, output %d\n", data->requestedFrames, n, data->outputFrames);
+        //     data->vsapi->getFrameAsync(data->requestedFrames, data->node, frameDoneCallback, userData);
+        //     if (data->alphaNode)
+        //         data->vsapi->getFrameAsync(data->requestedFrames, data->alphaNode, frameDoneCallback, userData);
+        //     data->requestedFrames++;
+        // }
+
+        // Test delayed request
+        bool shouldRequest = false;
+        bool sentRequest = false;
         if (completed && data->requestedFrames < data->totalFrames) {
             fprintf(stderr, "requested %d, current %d, output %d\n", data->requestedFrames, n, data->outputFrames);
-            data->vsapi->getFrameAsync(data->requestedFrames, data->node, frameDoneCallback, userData);
-            if (data->alphaNode)
-                data->vsapi->getFrameAsync(data->requestedFrames, data->alphaNode, frameDoneCallback, userData);
-            data->requestedFrames++;
+            shouldRequest = true;
         }
-
+        // /Test delayed request
         fprintf(stderr, "reorder size %d\n", (int)data->reorderMap.size());
 
         while (data->reorderMap.count(data->outputFrames) && isCompletedFrame(data->reorderMap[data->outputFrames], !!data->alphaNode)) {
@@ -401,6 +409,16 @@ static void VS_CC frameDoneCallback(void *userData, const VSFrame *f, int n, VSN
             data->vsapi->freeFrame(frame);
             data->vsapi->freeFrame(alphaFrame);
             data->outputFrames++;
+
+            // Test delayed request
+            if (shouldRequest && !sentRequest) {
+                data->vsapi->getFrameAsync(data->requestedFrames, data->node, frameDoneCallback, userData);
+                if (data->alphaNode)
+                    data->vsapi->getFrameAsync(data->requestedFrames, data->alphaNode, frameDoneCallback, userData);
+                data->requestedFrames++;
+                sentRequest = true;
+            }
+            // /Test delayed request
         }
     } else {
         data->outputError = true;
