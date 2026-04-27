@@ -252,7 +252,10 @@ void VSThreadPool::runTasks(std::atomic<bool> &stop) {
             break;
         }
 
-        if (!ranTask || activeThreads > maxThreads || core->memory->is_over_limit()) {
+        if (!ranTask || 
+                activeThreads > maxThreads || 
+                (activeThreads > 1 && 
+                 core->memory->allocated_bytes() > ((size_t)((float)core->memory->limit() * 1.5)))) {
             --activeThreads;
             if (stop) {
                 lock.unlock();
